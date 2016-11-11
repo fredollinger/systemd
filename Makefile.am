@@ -395,6 +395,7 @@ rootlibexec_PROGRAMS = \
 	systemd-reply-password \
 	systemd-fsck \
 	systemd-ac-power \
+	systemd-shim \
 	systemd-sysctl \
 	systemd-sleep \
 	systemd-socket-proxyd \
@@ -2686,6 +2687,13 @@ systemd_ac_power_SOURCES = \
 
 systemd_ac_power_LDADD = \
 	libsystemd-shared.la
+
+# ------------------------------------------------------------------------------
+systemd_shim_SOURCES = \
+	src/shim/shim.c
+
+#systemd_shim_LDADD = \
+#	libsystemd-shared.la
 
 # ------------------------------------------------------------------------------
 systemd_detect_virt_SOURCES = \
