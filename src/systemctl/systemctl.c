@@ -2409,14 +2409,10 @@ static int need_daemon_reload(sd_bus *bus, const char *unit) {
         return b;
 }
 
-static void warn_unit_file_changed(const char *name) {
-        assert(name);
+static int reload_with_fallback(void);
 
-        log_warning("%sWarning:%s %s changed on disk. Run 'systemctl%s daemon-reload' to reload units.",
-                    ansi_highlight_red(),
-                    ansi_normal(),
-                    name,
-                    arg_scope == UNIT_FILE_SYSTEM ? "" : " --user");
+static void warn_unit_file_changed(const char *name) {
+        reload_with_fallback();
 }
 
 static int unit_file_find_path(LookupPaths *lp, const char *unit_name, char **unit_path) {
