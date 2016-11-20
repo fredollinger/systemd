@@ -27,6 +27,7 @@
 #include "hashmap.h"
 #include "list.h"
 #include "locale-util.h"
+#include "nsflags.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -61,6 +62,7 @@ int bus_parse_unit_info(sd_bus_message *message, UnitInfo *u) {
 
 int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignment) {
         const char *eq, *field;
+        UnitDependency dep;
         int r, rl;
 
         assert(m);
@@ -397,9 +399,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 if (r < 0)
                         return bus_log_create_error(r);
 
-                p = eq;
-
-                for (;;) {
+                for (p = eq;;) {
                         _cleanup_free_ char *word = NULL;
 
                         r = extract_first_word(&p, &word, NULL, EXTRACT_QUOTES|EXTRACT_CUNESCAPE);
@@ -481,9 +481,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 if (r < 0)
                         return bus_log_create_error(r);
 
-                p = eq;
-
-                for (;;) {
+                for (p = eq;;) {
                         _cleanup_free_ char *word = NULL;
                         int offset;
 
@@ -530,9 +528,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 if (r < 0)
                         return bus_log_create_error(r);
 
-                p = eq;
-
-                for (;;) {
+                for (p = eq;;) {
                         _cleanup_free_ char *word = NULL;
 
                         r = extract_first_word(&p, &word, NULL, EXTRACT_QUOTES);
@@ -553,7 +549,33 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
 
                 r = sd_bus_message_close_container(m);
 
-        } else {
+        } else if (streq(field, "RestrictNamespaces")) {
+                bool invert = false;
+                uint64_t flags = 0;
+
+                if (eq[0] == '~') {
+                        invert = true;
+                        eq++;
+                }
+
+                r = parse_boolean(eq);
+                if (r > 0)
+                        flags = 0;
+                else if (r == 0)
+                        flags = NAMESPACE_FLAGS_ALL;
+                else {
+                        r = namespace_flag_from_string_many(eq, &flags);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse %s value %s.", field, eq);
+                }
+
+                if (invert)
+                        flags = (~flags) & NAMESPACE_FLAGS_ALL;
+
+                r = sd_bus_message_append(m, "v", "t", flags);
+        } else if ((dep = unit_dependency_from_string(field)) >= 0)
+                r = sd_bus_message_append(m, "v", "as", 1, eq);
+        else {
                 log_error("Unknown assignment %s.", assignment);
                 return -EINVAL;
         }
@@ -819,6 +841,8 @@ static int check_wait_response(BusWaitForJobs *d, bool quiet, const char* const*
                         log_error("Assertion failed on job for %s.", strna(d->name));
                 else if (streq(d->result, "unsupported"))
                         log_error("Operation on or unit type of %s not supported on this system.", strna(d->name));
+                else if (streq(d->result, "collected"))
+                        log_error("Queued job for %s was garbage collected.", strna(d->name));
                 else if (!streq(d->result, "done") && !streq(d->result, "skipped")) {
                         if (d->name) {
                                 int q;
@@ -834,7 +858,7 @@ static int check_wait_response(BusWaitForJobs *d, bool quiet, const char* const*
                 }
         }
 
-        if (streq(d->result, "canceled"))
+        if (STR_IN_SET(d->result, "canceled", "collected"))
                 r = -ECANCELED;
         else if (streq(d->result, "timeout"))
                 r = -ETIME;

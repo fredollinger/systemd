@@ -57,7 +57,7 @@
 #include "fd-util.h"
 #include "fdset.h"
 #include "fileio.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "gpt.h"
 #include "hostname-util.h"
@@ -110,6 +110,8 @@
  * nspawn_notify_socket_path is relative to the container
  * the init process in the container pid can send messages to nspawn following the sd_notify(3) protocol */
 #define NSPAWN_NOTIFY_SOCKET_PATH "/run/systemd/nspawn/notify"
+
+#define EXIT_FORCE_RESTART 133
 
 typedef enum ContainerStatus {
         CONTAINER_TERMINATED,
@@ -195,6 +197,7 @@ static const char *arg_container_service_name = "systemd-nspawn";
 static bool arg_notify_ready = false;
 static bool arg_use_cgns = true;
 static unsigned long arg_clone_ns_flags = CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWUTS;
+static MountSettingsMask arg_mount_settings = MOUNT_APPLY_APIVFS_RO;
 
 static void help(void) {
         printf("%s [OPTIONS...] [PATH] [ARGUMENTS...]\n\n"
@@ -376,6 +379,31 @@ static void parse_share_ns_env(const char *name, unsigned long ns_flag) {
         if (r < 0)
                 log_warning_errno(r, "Failed to parse %s from environment, defaulting to false.", name);
         arg_clone_ns_flags = (arg_clone_ns_flags & ~ns_flag) | (r > 0 ? 0 : ns_flag);
+}
+
+static void parse_mount_settings_env(void) {
+        int r;
+        const char *e;
+
+        e = getenv("SYSTEMD_NSPAWN_API_VFS_WRITABLE");
+        if (!e)
+                return;
+
+        if (streq(e, "network")) {
+                arg_mount_settings |= MOUNT_APPLY_APIVFS_RO|MOUNT_APPLY_APIVFS_NETNS;
+                return;
+        }
+
+        r = parse_boolean(e);
+        if (r < 0) {
+                log_warning_errno(r, "Failed to parse SYSTEMD_NSPAWN_API_VFS_WRITABLE from environment, ignoring.");
+                return;
+        } else if (r > 0)
+                arg_mount_settings &= ~MOUNT_APPLY_APIVFS_RO;
+        else
+                arg_mount_settings |= MOUNT_APPLY_APIVFS_RO;
+
+        arg_mount_settings &= ~MOUNT_APPLY_APIVFS_NETNS;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -1070,6 +1098,14 @@ static int parse_argv(int argc, char *argv[]) {
         parse_share_ns_env("SYSTEMD_NSPAWN_SHARE_NS_UTS", CLONE_NEWUTS);
         parse_share_ns_env("SYSTEMD_NSPAWN_SHARE_SYSTEM", CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWUTS);
 
+        if (arg_userns_mode != USER_NAMESPACE_NO)
+                arg_mount_settings |= MOUNT_USE_USERNS;
+
+        if (arg_private_network)
+                arg_mount_settings |= MOUNT_APPLY_APIVFS_NETNS;
+
+        parse_mount_settings_env();
+
         if (!(arg_clone_ns_flags & CLONE_NEWPID) ||
             !(arg_clone_ns_flags & CLONE_NEWUTS)) {
                 arg_register = false;
@@ -1164,6 +1200,15 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 static int verify_arguments(void) {
+        if (arg_userns_mode != USER_NAMESPACE_NO && (arg_mount_settings & MOUNT_APPLY_APIVFS_NETNS) && !arg_private_network) {
+                log_error("Invalid namespacing settings. Mounting sysfs with --private-users requires --private-network.");
+                return -EINVAL;
+        }
+
+        if (arg_userns_mode != USER_NAMESPACE_NO && !(arg_mount_settings & MOUNT_APPLY_APIVFS_RO)) {
+                log_error("Cannot combine --private-users with read-write mounts.");
+                return -EINVAL;
+        }
 
         if (arg_volatile_mode != VOLATILE_NO && arg_read_only) {
                 log_error("Cannot combine --read-only with --volatile. Note that --volatile already implies a read-only base hierarchy.");
@@ -1309,7 +1354,8 @@ static int setup_resolv_conf(const char *dest) {
         /* Fix resolv.conf, if possible */
         where = prefix_roota(dest, "/etc/resolv.conf");
 
-        if (access("/usr/lib/systemd/resolv.conf", F_OK) >= 0) {
+        if (access("/run/systemd/resolve/resolv.conf", F_OK) >= 0 &&
+                        access("/usr/lib/systemd/resolv.conf", F_OK) >= 0) {
                 /* resolved is enabled on the host. In this, case bind mount its static resolv.conf file into the
                  * container, so that the container can use the host's resolver. Given that network namespacing is
                  * disabled it's only natural of the container also uses the host's resolver. It also has the big
@@ -2260,7 +2306,7 @@ static int dissect_image(
 static int mount_device(const char *what, const char *where, const char *directory, bool rw) {
 #ifdef HAVE_BLKID
         _cleanup_blkid_free_probe_ blkid_probe b = NULL;
-        const char *fstype, *p;
+        const char *fstype, *p, *options;
         int r;
 
         assert(what);
@@ -2309,7 +2355,17 @@ static int mount_device(const char *what, const char *where, const char *directo
                 return -EOPNOTSUPP;
         }
 
-        return mount_verbose(LOG_ERR, what, p, fstype, MS_NODEV|(rw ? 0 : MS_RDONLY), NULL);
+        /* If this is a loopback device then let's mount the image with discard, so that the underlying file remains
+         * sparse when possible. */
+        if (STR_IN_SET(fstype, "btrfs", "ext4", "vfat", "xfs")) {
+                const char *l;
+
+                l = path_startswith(what, "/dev");
+                if (l && startswith(l, "loop"))
+                        options = "discard";
+        }
+
+        return mount_verbose(LOG_ERR, what, p, fstype, MS_NODEV|(rw ? 0 : MS_RDONLY), options);
 #else
         log_error("--image= is not supported, compiled without blkid support.");
         return -EOPNOTSUPP;
@@ -2537,7 +2593,7 @@ static int determine_names(void) {
                  * search for a machine, but instead create a new one
                  * in /var/lib/machine. */
 
-                arg_directory = strjoin("/var/lib/machines/", arg_machine, NULL);
+                arg_directory = strjoin("/var/lib/machines/", arg_machine);
                 if (!arg_directory)
                         return log_oom();
         }
@@ -2689,9 +2745,7 @@ static int inner_child(
                 return log_error_errno(r, "Couldn't become new root: %m");
 
         r = mount_all(NULL,
-                      arg_userns_mode != USER_NAMESPACE_NO,
-                      true,
-                      arg_private_network,
+                      arg_mount_settings | MOUNT_IN_USERNS,
                       arg_uid_shift,
                       arg_uid_range,
                       arg_selinux_apifs_context);
@@ -2699,7 +2753,7 @@ static int inner_child(
         if (r < 0)
                 return r;
 
-        r = mount_sysfs(NULL);
+        r = mount_sysfs(NULL, arg_mount_settings);
         if (r < 0)
                 return r;
 
@@ -3066,9 +3120,7 @@ static int outer_child(
         }
 
         r = mount_all(directory,
-                      arg_userns_mode != USER_NAMESPACE_NO,
-                      false,
-                      arg_private_network,
+                      arg_mount_settings,
                       arg_uid_shift,
                       arg_uid_range,
                       arg_selinux_apifs_context);
@@ -3380,7 +3432,7 @@ static int load_settings(void) {
         FOREACH_STRING(i, "/etc/systemd/nspawn", "/run/systemd/nspawn") {
                 _cleanup_free_ char *j = NULL;
 
-                j = strjoin(i, "/", fn, NULL);
+                j = strjoin(i, "/", fn);
                 if (!j)
                         return log_oom();
 
@@ -3991,7 +4043,7 @@ static int run(int master,
                  *         because 133 is special-cased in the service file to reboot the container.
                  * otherwise → The container exited with zero status and a reboot was not requested.
                  */
-                if (r == 133)
+                if (r == EXIT_FORCE_RESTART)
                         r = EXIT_FAILURE; /* replace 133 with the general failure code */
                 *ret = r;
                 return 0; /* finito */
@@ -4006,8 +4058,8 @@ static int run(int master,
                  * file uses RestartForceExitStatus=133 so that this results in a full
                  * nspawn restart. This is necessary since we might have cgroup parameters
                  * set we want to have flushed out. */
-                *ret = 0;
-                return 133;
+                *ret = EXIT_FORCE_RESTART;
+                return 0; /* finito */
         }
 
         expose_port_flush(arg_expose_ports, exposed);
@@ -4023,7 +4075,7 @@ int main(int argc, char *argv[]) {
         bool root_device_rw = true, home_device_rw = true, srv_device_rw = true;
         _cleanup_close_ int master = -1, image_fd = -1;
         _cleanup_fdset_free_ FDSet *fds = NULL;
-        int r, n_fd_passed, loop_nr = -1, ret = EXIT_FAILURE;
+        int r, n_fd_passed, loop_nr = -1, ret = EXIT_SUCCESS;
         char veth_name[IFNAMSIZ] = "";
         bool secondary = false, remove_subvol = false;
         pid_t pid = 0;
@@ -4265,8 +4317,8 @@ int main(int argc, char *argv[]) {
 
 finish:
         sd_notify(false,
-                  "STOPPING=1\n"
-                  "STATUS=Terminating...");
+                  r == 0 && ret == EXIT_FORCE_RESTART ? "STOPPING=1\nSTATUS=Restarting..." :
+                                                        "STOPPING=1\nSTATUS=Terminating...");
 
         if (pid > 0)
                 kill(pid, SIGKILL);

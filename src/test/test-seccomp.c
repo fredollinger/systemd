@@ -20,11 +20,18 @@
 #include <stdlib.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#include <sched.h>
 
+#include "alloc-util.h"
 #include "fd-util.h"
 #include "macro.h"
+#include "missing.h"
+#include "nsflags.h"
 #include "process-util.h"
+#include "raw-clone.h"
 #include "seccomp-util.h"
+#include "string-util.h"
+#include "util.h"
 
 static void test_seccomp_arch_to_string(void) {
         uint32_t a, b;
@@ -36,6 +43,36 @@ static void test_seccomp_arch_to_string(void) {
         assert_se(name);
         assert_se(seccomp_arch_from_string(name, &b) >= 0);
         assert_se(a == b);
+}
+
+static void test_architecture_table(void) {
+        const char *n, *n2;
+
+        NULSTR_FOREACH(n,
+                       "native\0"
+                       "x86\0"
+                       "x86-64\0"
+                       "x32\0"
+                       "arm\0"
+                       "arm64\0"
+                       "mips\0"
+                       "mips64\0"
+                       "mips64-n32\0"
+                       "mips-le\0"
+                       "mips64-le\0"
+                       "mips64-le-n32\0"
+                       "ppc\0"
+                       "ppc64\0"
+                       "ppc64-le\0"
+                       "s390\0"
+                       "s390x\0") {
+                uint32_t c;
+
+                assert_se(seccomp_arch_from_string(n, &c) >= 0);
+                n2 = seccomp_arch_to_string(c);
+                log_info("seccomp-arch: %s → 0x%"PRIx32" → %s", n, c, n2);
+                assert_se(streq_ptr(n, n2));
+        }
 }
 
 static void test_syscall_filter_set_find(void) {
@@ -93,11 +130,101 @@ static void test_filter_sets(void) {
         }
 }
 
+static void test_restrict_namespace(void) {
+        _cleanup_free_ char *s = NULL;
+        pid_t pid;
+        unsigned long ul;
+
+        assert_se(namespace_flag_to_string(0) == NULL);
+        assert_se(streq(namespace_flag_to_string(CLONE_NEWNS), "mnt"));
+        assert_se(namespace_flag_to_string(CLONE_NEWNS|CLONE_NEWIPC) == NULL);
+        assert_se(streq(namespace_flag_to_string(CLONE_NEWCGROUP), "cgroup"));
+
+        assert_se(namespace_flag_from_string("mnt") == CLONE_NEWNS);
+        assert_se(namespace_flag_from_string(NULL) == 0);
+        assert_se(namespace_flag_from_string("") == 0);
+        assert_se(namespace_flag_from_string("uts") == CLONE_NEWUTS);
+        assert_se(namespace_flag_from_string(namespace_flag_to_string(CLONE_NEWUTS)) == CLONE_NEWUTS);
+        assert_se(streq(namespace_flag_to_string(namespace_flag_from_string("ipc")), "ipc"));
+
+        assert_se(namespace_flag_from_string_many(NULL, &ul) == 0 && ul == 0);
+        assert_se(namespace_flag_from_string_many("", &ul) == 0 && ul == 0);
+        assert_se(namespace_flag_from_string_many("mnt uts ipc", &ul) == 0 && ul == (CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC));
+
+        assert_se(namespace_flag_to_string_many(NAMESPACE_FLAGS_ALL, &s) == 0);
+        assert_se(streq(s, "cgroup ipc net mnt pid user uts"));
+        assert_se(namespace_flag_from_string_many(s, &ul) == 0 && ul == NAMESPACE_FLAGS_ALL);
+
+        if (!is_seccomp_available())
+                return;
+
+        if (geteuid() != 0)
+                return;
+
+        pid = fork();
+        assert_se(pid >= 0);
+
+        if (pid == 0) {
+
+                assert_se(seccomp_restrict_namespaces(CLONE_NEWNS|CLONE_NEWNET) >= 0);
+
+                assert_se(unshare(CLONE_NEWNS) == 0);
+                assert_se(unshare(CLONE_NEWNET) == 0);
+                assert_se(unshare(CLONE_NEWUTS) == -1);
+                assert_se(errno == EPERM);
+                assert_se(unshare(CLONE_NEWIPC) == -1);
+                assert_se(errno == EPERM);
+                assert_se(unshare(CLONE_NEWNET|CLONE_NEWUTS) == -1);
+                assert_se(errno == EPERM);
+
+                /* We use fd 0 (stdin) here, which of course will fail with EINVAL on setns(). Except of course our
+                 * seccomp filter worked, and hits first and makes it return EPERM */
+                assert_se(setns(0, CLONE_NEWNS) == -1);
+                assert_se(errno == EINVAL);
+                assert_se(setns(0, CLONE_NEWNET) == -1);
+                assert_se(errno == EINVAL);
+                assert_se(setns(0, CLONE_NEWUTS) == -1);
+                assert_se(errno == EPERM);
+                assert_se(setns(0, CLONE_NEWIPC) == -1);
+                assert_se(errno == EPERM);
+                assert_se(setns(0, CLONE_NEWNET|CLONE_NEWUTS) == -1);
+                assert_se(errno == EPERM);
+                assert_se(setns(0, 0) == -1);
+                assert_se(errno == EPERM);
+
+                pid = raw_clone(CLONE_NEWNS);
+                assert_se(pid >= 0);
+                if (pid == 0)
+                        _exit(EXIT_SUCCESS);
+                pid = raw_clone(CLONE_NEWNET);
+                assert_se(pid >= 0);
+                if (pid == 0)
+                        _exit(EXIT_SUCCESS);
+                pid = raw_clone(CLONE_NEWUTS);
+                assert_se(pid < 0);
+                assert_se(errno == EPERM);
+                pid = raw_clone(CLONE_NEWIPC);
+                assert_se(pid < 0);
+                assert_se(errno == EPERM);
+                pid = raw_clone(CLONE_NEWNET|CLONE_NEWUTS);
+                assert_se(pid < 0);
+                assert_se(errno == EPERM);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        assert_se(wait_for_terminate_and_warn("nsseccomp", pid, true) == EXIT_SUCCESS);
+}
+
 int main(int argc, char *argv[]) {
 
+        log_set_max_level(LOG_DEBUG);
+
         test_seccomp_arch_to_string();
+        test_architecture_table();
         test_syscall_filter_set_find();
         test_filter_sets();
+        test_restrict_namespace();
 
         return 0;
 }

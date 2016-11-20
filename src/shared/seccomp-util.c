@@ -23,29 +23,57 @@
 #include <sys/prctl.h>
 #include <linux/seccomp.h>
 
+#include "alloc-util.h"
 #include "macro.h"
+#include "nsflags.h"
 #include "seccomp-util.h"
 #include "string-util.h"
 #include "util.h"
 
 const char* seccomp_arch_to_string(uint32_t c) {
+        /* Maintain order used in <seccomp.h>.
+         *
+         * Names used here should be the same as those used for ConditionArchitecture=,
+         * except for "subarchitectures" like x32. */
 
-        if (c == SCMP_ARCH_NATIVE)
+        switch(c) {
+        case SCMP_ARCH_NATIVE:
                 return "native";
-        if (c == SCMP_ARCH_X86)
+        case SCMP_ARCH_X86:
                 return "x86";
-        if (c == SCMP_ARCH_X86_64)
+        case SCMP_ARCH_X86_64:
                 return "x86-64";
-        if (c == SCMP_ARCH_X32)
+        case SCMP_ARCH_X32:
                 return "x32";
-        if (c == SCMP_ARCH_ARM)
+        case SCMP_ARCH_ARM:
                 return "arm";
-        if (c == SCMP_ARCH_S390)
+        case SCMP_ARCH_AARCH64:
+                return "arm64";
+        case SCMP_ARCH_MIPS:
+                return "mips";
+        case SCMP_ARCH_MIPS64:
+                return "mips64";
+        case SCMP_ARCH_MIPS64N32:
+                return "mips64-n32";
+        case SCMP_ARCH_MIPSEL:
+                return "mips-le";
+        case SCMP_ARCH_MIPSEL64:
+                return "mips64-le";
+        case SCMP_ARCH_MIPSEL64N32:
+                return "mips64-le-n32";
+        case SCMP_ARCH_PPC:
+                return "ppc";
+        case SCMP_ARCH_PPC64:
+                return "ppc64";
+        case SCMP_ARCH_PPC64LE:
+                return "ppc64-le";
+        case SCMP_ARCH_S390:
                 return "s390";
-        if (c == SCMP_ARCH_S390X)
+        case SCMP_ARCH_S390X:
                 return "s390x";
-
-        return NULL;
+        default:
+                return NULL;
+        }
 }
 
 int seccomp_arch_from_string(const char *n, uint32_t *ret) {
@@ -64,6 +92,26 @@ int seccomp_arch_from_string(const char *n, uint32_t *ret) {
                 *ret = SCMP_ARCH_X32;
         else if (streq(n, "arm"))
                 *ret = SCMP_ARCH_ARM;
+        else if (streq(n, "arm64"))
+                *ret = SCMP_ARCH_AARCH64;
+        else if (streq(n, "mips"))
+                *ret = SCMP_ARCH_MIPS;
+        else if (streq(n, "mips64"))
+                *ret = SCMP_ARCH_MIPS64;
+        else if (streq(n, "mips64-n32"))
+                *ret = SCMP_ARCH_MIPS64N32;
+        else if (streq(n, "mips-le"))
+                *ret = SCMP_ARCH_MIPSEL;
+        else if (streq(n, "mips64-le"))
+                *ret = SCMP_ARCH_MIPSEL64;
+        else if (streq(n, "mips64-le-n32"))
+                *ret = SCMP_ARCH_MIPSEL64N32;
+        else if (streq(n, "ppc"))
+                *ret = SCMP_ARCH_PPC;
+        else if (streq(n, "ppc64"))
+                *ret = SCMP_ARCH_PPC64;
+        else if (streq(n, "ppc64-le"))
+                *ret = SCMP_ARCH_PPC64LE;
         else if (streq(n, "s390"))
                 *ret = SCMP_ARCH_S390;
         else if (streq(n, "s390x"))
@@ -101,41 +149,52 @@ finish:
         return r;
 }
 
-int seccomp_add_secondary_archs(scmp_filter_ctx c) {
-
-#if defined(__i386__) || defined(__x86_64__)
-        int r;
+int seccomp_add_secondary_archs(scmp_filter_ctx ctx) {
 
         /* Add in all possible secondary archs we are aware of that
          * this kernel might support. */
 
-        r = seccomp_arch_add(c, SCMP_ARCH_X86);
-        if (r < 0 && r != -EEXIST)
-                return r;
+        static const int seccomp_arches[] = {
+#if defined(__i386__) || defined(__x86_64__)
+                SCMP_ARCH_X86,
+                SCMP_ARCH_X86_64,
+                SCMP_ARCH_X32,
 
-        r = seccomp_arch_add(c, SCMP_ARCH_X86_64);
-        if (r < 0 && r != -EEXIST)
-                return r;
+#elif defined(__arm__) || defined(__aarch64__)
+                SCMP_ARCH_ARM,
+                SCMP_ARCH_AARCH64,
 
-        r = seccomp_arch_add(c, SCMP_ARCH_X32);
-        if (r < 0 && r != -EEXIST)
-                return r;
+#elif defined(__arm__) || defined(__aarch64__)
+                SCMP_ARCH_ARM,
+                SCMP_ARCH_AARCH64,
+
+#elif defined(__mips__) || defined(__mips64__)
+                SCMP_ARCH_MIPS,
+                SCMP_ARCH_MIPS64,
+                SCMP_ARCH_MIPS64N32,
+                SCMP_ARCH_MIPSEL,
+                SCMP_ARCH_MIPSEL64,
+                SCMP_ARCH_MIPSEL64N32,
+
+#elif defined(__powerpc__) || defined(__powerpc64__)
+                SCMP_ARCH_PPC,
+                SCMP_ARCH_PPC64,
+                SCMP_ARCH_PPC64LE,
 
 #elif defined(__s390__) || defined(__s390x__)
+                SCMP_ARCH_S390,
+                SCMP_ARCH_S390X,
+#endif
+        };
+
+        unsigned i;
         int r;
 
-        /* Add in all possible secondary archs we are aware of that
-         * this kernel might support. */
-
-        r = seccomp_arch_add(c, SCMP_ARCH_S390);
-        if (r < 0 && r != -EEXIST)
-                return r;
-
-        r = seccomp_arch_add(c, SCMP_ARCH_S390X);
-        if (r < 0 && r != -EEXIST)
-                return r;
-
-#endif
+        for (i = 0; i < ELEMENTSOF(seccomp_arches); i++) {
+                r = seccomp_arch_add(ctx, seccomp_arches[i]);
+                if (r < 0 && r != -EEXIST)
+                        return r;
+        }
 
         return 0;
 }
@@ -160,9 +219,45 @@ bool is_seccomp_available(void) {
 }
 
 const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
+        [SYSCALL_FILTER_SET_DEFAULT] = {
+                .name = "@default",
+                .help = "System calls that are always permitted",
+                .value =
+                "clock_getres\0"
+                "clock_gettime\0"
+                "clock_nanosleep\0"
+                "execve\0"
+                "exit\0"
+                "exit_group\0"
+                "getrlimit\0"      /* make sure processes can query stack size and such */
+                "gettimeofday\0"
+                "nanosleep\0"
+                "pause\0"
+                "rt_sigreturn\0"
+                "sigreturn\0"
+                "time\0"
+        },
+        [SYSCALL_FILTER_SET_BASIC_IO] = {
+                .name = "@basic-io",
+                .help = "Basic IO",
+                .value =
+                "close\0"
+                "dup2\0"
+                "dup3\0"
+                "dup\0"
+                "lseek\0"
+                "pread64\0"
+                "preadv\0"
+                "pwrite64\0"
+                "pwritev\0"
+                "read\0"
+                "readv\0"
+                "write\0"
+                "writev\0"
+        },
         [SYSCALL_FILTER_SET_CLOCK] = {
-                /* Clock */
                 .name = "@clock",
+                .help = "Change the system time",
                 .value =
                 "adjtimex\0"
                 "clock_adjtime\0"
@@ -171,8 +266,8 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "stime\0"
         },
         [SYSCALL_FILTER_SET_CPU_EMULATION] = {
-                /* CPU emulation calls */
                 .name = "@cpu-emulation",
+                .help = "System calls for CPU emulation functionality",
                 .value =
                 "modify_ldt\0"
                 "subpage_prot\0"
@@ -181,8 +276,8 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "vm86old\0"
         },
         [SYSCALL_FILTER_SET_DEBUG] = {
-                /* Debugging/Performance Monitoring/Tracing */
                 .name = "@debug",
+                .help = "Debugging, performance monitoring and tracing functionality",
                 .value =
                 "lookup_dcookie\0"
                 "perf_event_open\0"
@@ -195,20 +290,9 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
 #endif
                 "sys_debug_setcontext\0"
         },
-        [SYSCALL_FILTER_SET_DEFAULT] = {
-                /* Default list */
-                .name = "@default",
-                .value =
-                "execve\0"
-                "exit\0"
-                "exit_group\0"
-                "getrlimit\0"      /* make sure processes can query stack size and such */
-                "rt_sigreturn\0"
-                "sigreturn\0"
-        },
         [SYSCALL_FILTER_SET_IO_EVENT] = {
-                /* Event loop use */
                 .name = "@io-event",
+                .help = "Event loop system calls",
                 .value =
                 "_newselect\0"
                 "epoll_create1\0"
@@ -226,9 +310,11 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "select\0"
         },
         [SYSCALL_FILTER_SET_IPC] = {
-                /* Message queues, SYSV IPC or other IPC: unusual */
                 .name = "@ipc",
-                .value = "ipc\0"
+                .help = "SysV IPC, POSIX Message Queues or other IPC",
+                .value =
+                "ipc\0"
+                "memfd_create\0"
                 "mq_getsetattr\0"
                 "mq_notify\0"
                 "mq_open\0"
@@ -239,6 +325,8 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "msgget\0"
                 "msgrcv\0"
                 "msgsnd\0"
+                "pipe2\0"
+                "pipe\0"
                 "process_vm_readv\0"
                 "process_vm_writev\0"
                 "semctl\0"
@@ -251,24 +339,24 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "shmget\0"
         },
         [SYSCALL_FILTER_SET_KEYRING] = {
-                /* Keyring */
                 .name = "@keyring",
+                .help = "Kernel keyring access",
                 .value =
                 "add_key\0"
                 "keyctl\0"
                 "request_key\0"
         },
         [SYSCALL_FILTER_SET_MODULE] = {
-                /* Kernel module control */
                 .name = "@module",
+                .help = "Loading and unloading of kernel modules",
                 .value =
                 "delete_module\0"
                 "finit_module\0"
                 "init_module\0"
         },
         [SYSCALL_FILTER_SET_MOUNT] = {
-                /* Mounting */
                 .name = "@mount",
+                .help = "Mounting and unmounting of file systems",
                 .value =
                 "chroot\0"
                 "mount\0"
@@ -277,8 +365,8 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "umount\0"
         },
         [SYSCALL_FILTER_SET_NETWORK_IO] = {
-                /* Network or Unix socket IO, should not be needed if not network facing */
                 .name = "@network-io",
+                .help = "Network or Unix socket IO, should not be needed if not network facing",
                 .value =
                 "accept4\0"
                 "accept\0"
@@ -303,8 +391,9 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "socketpair\0"
         },
         [SYSCALL_FILTER_SET_OBSOLETE] = {
-                /* Unusual, obsolete or unimplemented, some unknown even to libseccomp */
+                /* some unknown even to libseccomp */
                 .name = "@obsolete",
+                .help = "Unusual, obsolete or unimplemented system calls",
                 .value =
                 "_sysctl\0"
                 "afs_syscall\0"
@@ -332,8 +421,8 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "vserver\0"
         },
         [SYSCALL_FILTER_SET_PRIVILEGED] = {
-                /* Nice grab-bag of all system calls which need superuser capabilities */
                 .name = "@privileged",
+                .help = "All system calls which need super-user capabilities",
                 .value =
                 "@clock\0"
                 "@module\0"
@@ -374,12 +463,11 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "vhangup\0"
         },
         [SYSCALL_FILTER_SET_PROCESS] = {
-                /* Process control, execution, namespaces */
                 .name = "@process",
+                .help = "Process control, execution, namespaceing operations",
                 .value =
                 "arch_prctl\0"
                 "clone\0"
-                "execve\0"
                 "execveat\0"
                 "fork\0"
                 "kill\0"
@@ -391,8 +479,8 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "vfork\0"
         },
         [SYSCALL_FILTER_SET_RAW_IO] = {
-                /* Raw I/O ports */
                 .name = "@raw-io",
+                .help = "Raw I/O port access",
                 .value =
                 "ioperm\0"
                 "iopl\0"
@@ -405,6 +493,22 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
 #ifdef __NR_s390_pci_mmio_write
                 "s390_pci_mmio_write\0"
 #endif
+        },
+        [SYSCALL_FILTER_SET_RESOURCES] = {
+                /* Alter resource settings */
+                .name = "@resources",
+                .value =
+                "sched_setparam\0"
+                "sched_setscheduler\0"
+                "sched_setaffinity\0"
+                "setpriority\0"
+                "setrlimit\0"
+                "set_mempolicy\0"
+                "migrate_pages\0"
+                "move_pages\0"
+                "mbind\0"
+                "sched_setattr\0"
+                "prlimit64\0"
         },
 };
 
@@ -474,5 +578,92 @@ int seccomp_load_filter_set(uint32_t default_action, const SyscallFilterSet *set
 finish:
         seccomp_release(seccomp);
         return r;
+}
 
+int seccomp_restrict_namespaces(unsigned long retain) {
+        scmp_filter_ctx seccomp;
+        unsigned i;
+        int r;
+
+        if (log_get_max_level() >= LOG_DEBUG) {
+                _cleanup_free_ char *s = NULL;
+
+                (void) namespace_flag_to_string_many(retain, &s);
+                log_debug("Restricting namespace to: %s.", strna(s));
+        }
+
+        /* NOOP? */
+        if ((retain & NAMESPACE_FLAGS_ALL) == NAMESPACE_FLAGS_ALL)
+                return 0;
+
+        r = seccomp_init_conservative(&seccomp, SCMP_ACT_ALLOW);
+        if (r < 0)
+                return r;
+
+        if ((retain & NAMESPACE_FLAGS_ALL) == 0)
+                /* If every single kind of namespace shall be prohibited, then let's block the whole setns() syscall
+                 * altogether. */
+                r = seccomp_rule_add(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(setns),
+                                0);
+        else
+                /* Otherwise, block only the invocations with the appropriate flags in the loop below, but also the
+                 * special invocation with a zero flags argument, right here. */
+                r = seccomp_rule_add(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(setns),
+                                1,
+                                SCMP_A1(SCMP_CMP_EQ, 0));
+        if (r < 0)
+                goto finish;
+
+        for (i = 0; namespace_flag_map[i].name; i++) {
+                unsigned long f;
+
+                f = namespace_flag_map[i].flag;
+                if ((retain & f) == f) {
+                        log_debug("Permitting %s.", namespace_flag_map[i].name);
+                        continue;
+                }
+
+                log_debug("Blocking %s.", namespace_flag_map[i].name);
+
+                r = seccomp_rule_add(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(unshare),
+                                1,
+                                SCMP_A0(SCMP_CMP_MASKED_EQ, f, f));
+                if (r < 0)
+                        goto finish;
+
+                r = seccomp_rule_add(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(clone),
+                                1,
+                                SCMP_A0(SCMP_CMP_MASKED_EQ, f, f));
+                if (r < 0)
+                        goto finish;
+
+                if ((retain & NAMESPACE_FLAGS_ALL) != 0) {
+                        r = seccomp_rule_add(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPERM),
+                                        SCMP_SYS(setns),
+                                        1,
+                                        SCMP_A1(SCMP_CMP_MASKED_EQ, f, f));
+                        if (r < 0)
+                                goto finish;
+                }
+        }
+
+        r = seccomp_load(seccomp);
+
+finish:
+        seccomp_release(seccomp);
+        return r;
 }

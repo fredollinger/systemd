@@ -71,7 +71,7 @@
 #include "exit-status.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "glob-util.h"
 #include "io-util.h"
@@ -624,7 +624,7 @@ static int chown_terminal(int fd, uid_t uid) {
         return 0;
 }
 
-static int setup_confirm_stdio(int *_saved_stdin, int *_saved_stdout) {
+static int setup_confirm_stdio(const char *vc, int *_saved_stdin, int *_saved_stdout) {
         _cleanup_close_ int fd = -1, saved_stdin = -1, saved_stdout = -1;
         int r;
 
@@ -639,12 +639,7 @@ static int setup_confirm_stdio(int *_saved_stdin, int *_saved_stdout) {
         if (saved_stdout < 0)
                 return -errno;
 
-        fd = acquire_terminal(
-                        "/dev/console",
-                        false,
-                        false,
-                        false,
-                        DEFAULT_CONFIRM_USEC);
+        fd = acquire_terminal(vc, false, false, false, DEFAULT_CONFIRM_USEC);
         if (fd < 0)
                 return fd;
 
@@ -674,21 +669,27 @@ static int setup_confirm_stdio(int *_saved_stdin, int *_saved_stdout) {
         return 0;
 }
 
-_printf_(1, 2) static int write_confirm_message(const char *format, ...) {
+static void write_confirm_error_fd(int err, int fd, const Unit *u) {
+        assert(err < 0);
+
+        if (err == -ETIMEDOUT)
+                dprintf(fd, "Confirmation question timed out for %s, assuming positive response.\n", u->id);
+        else {
+                errno = -err;
+                dprintf(fd, "Couldn't ask confirmation for %s: %m, assuming positive response.\n", u->id);
+        }
+}
+
+static void write_confirm_error(int err, const char *vc, const Unit *u) {
         _cleanup_close_ int fd = -1;
-        va_list ap;
 
-        assert(format);
+        assert(vc);
 
-        fd = open_terminal("/dev/console", O_WRONLY|O_NOCTTY|O_CLOEXEC);
+        fd = open_terminal(vc, O_WRONLY|O_NOCTTY|O_CLOEXEC);
         if (fd < 0)
-                return fd;
+                return;
 
-        va_start(ap, format);
-        vdprintf(fd, format, ap);
-        va_end(ap);
-
-        return 0;
+        write_confirm_error_fd(err, fd, u);
 }
 
 static int restore_confirm_stdio(int *saved_stdin, int *saved_stdout) {
@@ -713,22 +714,96 @@ static int restore_confirm_stdio(int *saved_stdin, int *saved_stdout) {
         return r;
 }
 
-static int ask_for_confirmation(char *response, char **argv) {
+enum {
+        CONFIRM_PRETEND_FAILURE = -1,
+        CONFIRM_PRETEND_SUCCESS =  0,
+        CONFIRM_EXECUTE = 1,
+};
+
+static int ask_for_confirmation(const char *vc, Unit *u, const char *cmdline) {
         int saved_stdout = -1, saved_stdin = -1, r;
-        _cleanup_free_ char *line = NULL;
+        _cleanup_free_ char *e = NULL;
+        char c;
 
-        r = setup_confirm_stdio(&saved_stdin, &saved_stdout);
-        if (r < 0)
-                return r;
+        /* For any internal errors, assume a positive response. */
+        r = setup_confirm_stdio(vc, &saved_stdin, &saved_stdout);
+        if (r < 0) {
+                write_confirm_error(r, vc, u);
+                return CONFIRM_EXECUTE;
+        }
 
-        line = exec_command_line(argv);
-        if (!line)
-                return -ENOMEM;
+        /* confirm_spawn might have been disabled while we were sleeping. */
+        if (manager_is_confirm_spawn_disabled(u->manager)) {
+                r = 1;
+                goto restore_stdio;
+        }
 
-        r = ask_char(response, "yns", "Execute %s? [Yes, No, Skip] ", line);
+        e = ellipsize(cmdline, 60, 100);
+        if (!e) {
+                log_oom();
+                r = CONFIRM_EXECUTE;
+                goto restore_stdio;
+        }
 
+        for (;;) {
+                r = ask_char(&c, "yfshiDjcn", "Execute %s? [y, f, s – h for help] ", e);
+                if (r < 0) {
+                        write_confirm_error_fd(r, STDOUT_FILENO, u);
+                        r = CONFIRM_EXECUTE;
+                        goto restore_stdio;
+                }
+
+                switch (c) {
+                case 'c':
+                        printf("Resuming normal execution.\n");
+                        manager_disable_confirm_spawn();
+                        r = 1;
+                        break;
+                case 'D':
+                        unit_dump(u, stdout, "  ");
+                        continue; /* ask again */
+                case 'f':
+                        printf("Failing execution.\n");
+                        r = CONFIRM_PRETEND_FAILURE;
+                        break;
+                case 'h':
+                        printf("  c - continue, proceed without asking anymore\n"
+                               "  D - dump, show the state of the unit\n"
+                               "  f - fail, don't execute the command and pretend it failed\n"
+                               "  h - help\n"
+                               "  i - info, show a short summary of the unit\n"
+                               "  j - jobs, show jobs that are in progress\n"
+                               "  s - skip, don't execute the command and pretend it succeeded\n"
+                               "  y - yes, execute the command\n");
+                        continue; /* ask again */
+                case 'i':
+                        printf("  Description: %s\n"
+                               "  Unit:        %s\n"
+                               "  Command:     %s\n",
+                               u->id, u->description, cmdline);
+                        continue; /* ask again */
+                case 'j':
+                        manager_dump_jobs(u->manager, stdout, "  ");
+                        continue; /* ask again */
+                case 'n':
+                        /* 'n' was removed in favor of 'f'. */
+                        printf("Didn't understand 'n', did you mean 'f'?\n");
+                        continue; /* ask again */
+                case 's':
+                        printf("Skipping execution.\n");
+                        r = CONFIRM_PRETEND_SUCCESS;
+                        break;
+                case 'y':
+                        r = CONFIRM_EXECUTE;
+                        break;
+                default:
+                        assert_not_reached("Unhandled choice");
+                }
+                break;
+        }
+
+restore_stdio:
         restore_confirm_stdio(&saved_stdin, &saved_stdout);
-
         return r;
 }
 
@@ -773,11 +848,9 @@ static int get_fixed_group(const ExecContext *c, const char **group, gid_t *gid)
         return 0;
 }
 
-static int get_fixed_supplementary_groups(const ExecContext *c,
-                                          const char *user,
-                                          const char *group,
-                                          gid_t gid,
-                                          gid_t **supplementary_gids, int *ngids) {
+static int get_supplementary_groups(const ExecContext *c, const char *user,
+                                    const char *group, gid_t gid,
+                                    gid_t **supplementary_gids, int *ngids) {
         char **i;
         int r, k = 0;
         int ngroups_max;
@@ -786,6 +859,20 @@ static int get_fixed_supplementary_groups(const ExecContext *c,
         _cleanup_free_ gid_t *l_gids = NULL;
 
         assert(c);
+
+        /*
+         * If user is given, then lookup GID and supplementary groups list.
+         * We avoid NSS lookups for gid=0. Also we have to initialize groups
+         * here and as early as possible so we keep the list of supplementary
+         * groups of the caller.
+         */
+        if (user && gid_is_valid(gid) && gid != 0) {
+                /* First step, initialize groups from /etc/groups */
+                if (initgroups(user, gid) < 0)
+                        return -errno;
+
+                keep_groups = true;
+        }
 
         if (!c->supplementary_groups)
                 return 0;
@@ -801,18 +888,6 @@ static int get_fixed_supplementary_groups(const ExecContext *c,
                         return -errno;
                 else
                         return -EOPNOTSUPP; /* For all other values */
-        }
-
-        /*
-         * If user is given, then lookup GID and supplementary group list.
-         * We avoid NSS lookups for gid=0.
-         */
-        if (user && gid_is_valid(gid) && gid != 0) {
-                /* First step, initialize groups from /etc/groups */
-                if (initgroups(user, gid) < 0)
-                        return -errno;
-
-                keep_groups = true;
         }
 
         l_gids = new(gid_t, ngroups_max);
@@ -1534,6 +1609,18 @@ static int apply_private_devices(const Unit *u, const ExecContext *c) {
         return seccomp_load_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_RAW_IO, SCMP_ACT_ERRNO(EPERM));
 }
 
+static int apply_restrict_namespaces(Unit *u, const ExecContext *c) {
+        assert(c);
+
+        if (!exec_context_restrict_namespaces_set(c))
+                return 0;
+
+        if (skip_seccomp_unavailable(u, "RestrictNamespaces="))
+                return 0;
+
+        return seccomp_restrict_namespaces(c->restrict_namespaces);
+}
+
 #endif
 
 static void do_idle_pipe_dance(int idle_pipe[4]) {
@@ -1603,7 +1690,7 @@ static int build_environment(
                 if (!joined)
                         return -ENOMEM;
 
-                x = strjoin("LISTEN_FDNAMES=", joined, NULL);
+                x = strjoin("LISTEN_FDNAMES=", joined);
                 if (!x)
                         return -ENOMEM;
                 our_env[n_env++] = x;
@@ -1710,7 +1797,7 @@ static int build_pass_environment(const ExecContext *c, char ***ret) {
                 v = getenv(*i);
                 if (!v)
                         continue;
-                x = strjoin(*i, "=", v, NULL);
+                x = strjoin(*i, "=", v);
                 if (!x)
                         return -ENOMEM;
                 if (!GREEDY_REALLOC(pass_env, n_bufsize, n_env + 2))
@@ -1924,7 +2011,7 @@ static int setup_runtime_directory(
         STRV_FOREACH(rt, context->runtime_directory) {
                 _cleanup_free_ char *p;
 
-                p = strjoin(params->runtime_prefix, "/", *rt, NULL);
+                p = strjoin(params->runtime_prefix, "/", *rt);
                 if (!p)
                         return -ENOMEM;
 
@@ -2000,7 +2087,7 @@ static int compile_read_write_paths(
         STRV_FOREACH(rt, context->runtime_directory) {
                 char *s;
 
-                s = strjoin(params->runtime_prefix, "/", *rt, NULL);
+                s = strjoin(params->runtime_prefix, "/", *rt);
                 if (!s)
                         return -ENOMEM;
 
@@ -2022,6 +2109,7 @@ static int apply_mount_namespace(Unit *u, const ExecContext *context,
         char *tmp = NULL, *var = NULL;
         const char *root_dir = NULL;
         NameSpaceInfo ns_info = {
+                .ignore_protect_paths = false,
                 .private_dev = context->private_devices,
                 .protect_control_groups = context->protect_control_groups,
                 .protect_kernel_tunables = context->protect_kernel_tunables,
@@ -2047,6 +2135,14 @@ static int apply_mount_namespace(Unit *u, const ExecContext *context,
 
         if (params->flags & EXEC_APPLY_CHROOT)
                 root_dir = context->root_directory;
+
+        /*
+         * If DynamicUser=no and RootDirectory= is set then lets pass a relaxed
+         * sandbox info, otherwise enforce it, don't ignore protected paths and
+         * fail if we are enable to apply the sandbox inside the mount namespace.
+         */
+        if (!context->dynamic_user && root_dir)
+                ns_info.ignore_protect_paths = true;
 
         r = setup_namespace(root_dir, &ns_info, rw,
                             context->read_only_paths,
@@ -2180,9 +2276,11 @@ static bool context_has_no_new_privileges(const ExecContext *c) {
         if (have_effective_cap(CAP_SYS_ADMIN)) /* if we are privileged, we don't need NNP */
                 return false;
 
-        return context_has_address_families(c) || /* we need NNP if we have any form of seccomp and are unprivileged */
+        /* We need NNP if we have any form of seccomp and are unprivileged */
+        return context_has_address_families(c) ||
                 c->memory_deny_write_execute ||
                 c->restrict_realtime ||
+                exec_context_restrict_namespaces_set(c) ||
                 c->protect_kernel_tunables ||
                 c->protect_kernel_modules ||
                 c->private_devices ||
@@ -2292,22 +2390,24 @@ static int exec_child(
 
         exec_context_tty_reset(context, params);
 
-        if (params->flags & EXEC_CONFIRM_SPAWN) {
-                char response;
+        if (unit_shall_confirm_spawn(unit)) {
+                const char *vc = params->confirm_spawn;
+                _cleanup_free_ char *cmdline = NULL;
 
-                r = ask_for_confirmation(&response, argv);
-                if (r == -ETIMEDOUT)
-                        write_confirm_message("Confirmation question timed out, assuming positive response.\n");
-                else if (r < 0)
-                        write_confirm_message("Couldn't ask confirmation question, assuming positive response: %s\n", strerror(-r));
-                else if (response == 's') {
-                        write_confirm_message("Skipping execution.\n");
+                cmdline = exec_command_line(argv);
+                if (!cmdline) {
+                        *exit_status = EXIT_CONFIRM;
+                        return -ENOMEM;
+                }
+
+                r = ask_for_confirmation(vc, unit, cmdline);
+                if (r != CONFIRM_EXECUTE) {
+                        if (r == CONFIRM_PRETEND_SUCCESS) {
+                                *exit_status = EXIT_SUCCESS;
+                                return 0;
+                        }
                         *exit_status = EXIT_CONFIRM;
                         return -ECANCELED;
-                } else if (response == 'n') {
-                        write_confirm_message("Failing execution.\n");
-                        *exit_status = 0;
-                        return 0;
                 }
         }
 
@@ -2345,13 +2445,14 @@ static int exec_child(
                         *exit_status = EXIT_GROUP;
                         return r;
                 }
+        }
 
-                r = get_fixed_supplementary_groups(context, username, groupname,
-                                                   gid, &supplementary_gids, &ngids);
-                if (r < 0) {
-                        *exit_status = EXIT_GROUP;
-                        return r;
-                }
+        /* Initialize user supplementary groups and get SupplementaryGroups= ones */
+        r = get_supplementary_groups(context, username, groupname, gid,
+                                     &supplementary_gids, &ngids);
+        if (r < 0) {
+                *exit_status = EXIT_GROUP;
+                return r;
         }
 
         r = send_user_lookup(unit, user_lookup_fd, uid, gid);
@@ -2538,12 +2639,6 @@ static int exec_child(
         (void) umask(context->umask);
 
         if ((params->flags & EXEC_APPLY_PERMISSIONS) && !command->privileged) {
-                r = setup_smack(context, command);
-                if (r < 0) {
-                        *exit_status = EXIT_SMACK_PROCESS_LABEL;
-                        return r;
-                }
-
                 if (context->pam_name && username) {
                         r = setup_pam(context->pam_name, username, uid, gid, context->tty_path, &accum_env, fds, n_fds);
                         if (r < 0) {
@@ -2577,7 +2672,7 @@ static int exec_child(
                 return r;
         }
 
-        /* Drop group as early as possbile */
+        /* Drop groups as early as possbile */
         if ((params->flags & EXEC_APPLY_PERMISSIONS) && !command->privileged) {
                 r = enforce_groups(context, gid, supplementary_gids, ngids);
                 if (r < 0) {
@@ -2693,6 +2788,41 @@ static int exec_child(
                         }
                 }
 
+                /* Apply the MAC contexts late, but before seccomp syscall filtering, as those should really be last to
+                 * influence our own codepaths as little as possible. Moreover, applying MAC contexts usually requires
+                 * syscalls that are subject to seccomp filtering, hence should probably be applied before the syscalls
+                 * are restricted. */
+
+#ifdef HAVE_SELINUX
+                if (mac_selinux_use()) {
+                        char *exec_context = mac_selinux_context_net ?: context->selinux_context;
+
+                        if (exec_context) {
+                                r = setexeccon(exec_context);
+                                if (r < 0) {
+                                        *exit_status = EXIT_SELINUX_CONTEXT;
+                                        return r;
+                                }
+                        }
+                }
+#endif
+
+                r = setup_smack(context, command);
+                if (r < 0) {
+                        *exit_status = EXIT_SMACK_PROCESS_LABEL;
+                        return r;
+                }
+
+#ifdef HAVE_APPARMOR
+                if (context->apparmor_profile && mac_apparmor_use()) {
+                        r = aa_change_onexec(context->apparmor_profile);
+                        if (r < 0 && !context->apparmor_profile_ignore) {
+                                *exit_status = EXIT_APPARMOR_PROFILE;
+                                return -errno;
+                        }
+                }
+#endif
+
                 /* PR_GET_SECUREBITS is not privileged, while
                  * PR_SET_SECUREBITS is. So to suppress
                  * potential EPERMs we'll try not to call
@@ -2734,6 +2864,12 @@ static int exec_child(
                         }
                 }
 
+                r = apply_restrict_namespaces(unit, context);
+                if (r < 0) {
+                        *exit_status = EXIT_SECCOMP;
+                        return r;
+                }
+
                 if (context->protect_kernel_tunables) {
                         r = apply_protect_sysctl(unit, context);
                         if (r < 0) {
@@ -2758,35 +2894,13 @@ static int exec_child(
                         }
                 }
 
+                /* This really should remain the last step before the execve(), to make sure our own code is unaffected
+                 * by the filter as little as possible. */
                 if (context_has_syscall_filters(context)) {
                         r = apply_seccomp(unit, context);
                         if (r < 0) {
                                 *exit_status = EXIT_SECCOMP;
                                 return r;
-                        }
-                }
-#endif
-
-#ifdef HAVE_SELINUX
-                if (mac_selinux_use()) {
-                        char *exec_context = mac_selinux_context_net ?: context->selinux_context;
-
-                        if (exec_context) {
-                                r = setexeccon(exec_context);
-                                if (r < 0) {
-                                        *exit_status = EXIT_SELINUX_CONTEXT;
-                                        return r;
-                                }
-                        }
-                }
-#endif
-
-#ifdef HAVE_APPARMOR
-                if (context->apparmor_profile && mac_apparmor_use()) {
-                        r = aa_change_onexec(context->apparmor_profile);
-                        if (r < 0 && !context->apparmor_profile_ignore) {
-                                *exit_status = EXIT_APPARMOR_PROFILE;
-                                return -errno;
                         }
                 }
 #endif
@@ -2939,6 +3053,7 @@ void exec_context_init(ExecContext *c) {
         c->personality = PERSONALITY_INVALID;
         c->runtime_directory_mode = 0755;
         c->capability_bounding_set = CAP_ALL;
+        c->restrict_namespaces = NAMESPACE_FLAGS_ALL;
 }
 
 void exec_context_done(ExecContext *c) {
@@ -2996,7 +3111,7 @@ int exec_context_destroy_runtime_directory(ExecContext *c, const char *runtime_p
         STRV_FOREACH(i, c->runtime_directory) {
                 _cleanup_free_ char *p;
 
-                p = strjoin(runtime_prefix, "/", *i, NULL);
+                p = strjoin(runtime_prefix, "/", *i);
                 if (!p)
                         return -ENOMEM;
 
@@ -3236,6 +3351,7 @@ static void strv_fprintf(FILE *f, char **l) {
 void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
         char **e, **d;
         unsigned i;
+        int r;
 
         assert(c);
         assert(f);
@@ -3516,6 +3632,15 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
                 fputc('\n', f);
         }
 
+        if (exec_context_restrict_namespaces_set(c)) {
+                _cleanup_free_ char *s = NULL;
+
+                r = namespace_flag_to_string_many(c->restrict_namespaces, &s);
+                if (r >= 0)
+                        fprintf(f, "%sRestrictNamespaces: %s\n",
+                                prefix, s);
+        }
+
         if (c->syscall_errno > 0)
                 fprintf(f,
                         "%sSystemCallErrorNumber: %s\n",
@@ -3611,7 +3736,8 @@ char *exec_command_line(char **argv) {
         STRV_FOREACH(a, argv)
                 k += strlen(*a)+3;
 
-        if (!(n = new(char, k)))
+        n = new(char, k);
+        if (!n)
                 return NULL;
 
         p = n;

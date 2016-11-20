@@ -23,14 +23,21 @@ External:
 
 Janitorial Clean-ups:
 
-* code cleanup: retire FOREACH_WORD_QUOTED, port to extract_first_word() loops instead.
-  For example, most conf parsing callbacks should use it.
-
 * replace manual readdir() loops with FOREACH_DIRENT or FOREACH_DIRENT_ALL
 
 * Rearrange tests so that the various test-xyz.c match a specific src/basic/xyz.c again
 
 Features:
+
+* replace all canonicalize_file_name() invocations by chase_symlinks(), in
+  particulr those where a rootdir is relevant.
+
+* add parse_ip_port() or so, that is like safe_atou16() but checks for != 0
+
+* drop nss-myhostname in favour of nss-resolve?
+
+* drop internal dlopen() based nss-dns fallback in nss-resolve, and rely on the
+  external nsswitch.conf based one
 
 * add a percentage syntax for TimeoutStopSec=, e.g. TimeoutStopSec=150%, and
   then use that for the setting used in user@.service. It should be understood
@@ -54,13 +61,9 @@ Features:
 
 * define gpt header bits to select volatility mode
 
-* nspawn: mount loopback filesystems with "discard"
-
 * ProtectKernelLogs= (drops CAP_SYSLOG, add seccomp for syslog() syscall, and DeviceAllow to /dev/kmsg) in service files
 
 * ProtectClock= (drops CAP_SYS_TIMES, adds seecomp filters for settimeofday, adjtimex), sets DeviceAllow o /dev/rtc
-
-* ProtectKernelModules= (drops CAP_SYS_MODULE and filters the kmod syscalls)
 
 * ProtectTracing= (drops CAP_SYS_PTRACE, blocks ptrace syscall, makes /sys/kernel/tracing go away)
 
@@ -82,8 +85,6 @@ Features:
 * Add BindDirectory= for allowing arbitrary, private bind mounts for services
 
 * Add RootImage= for mounting a disk image or file as root directory
-
-* RestrictNamespaces= or so in services (taking away the ability to create namespaces, with setns, unshare, clone)
 
 * make sure the ratelimit object can deal with USEC_INFINITY as way to turn off things
 
@@ -564,7 +565,6 @@ Features:
   - man: maybe sort directives in man pages, and take sections from --help and apply them to man too
 
 * systemctl:
-  - systemctl list-jobs - show dependencies
   - add systemctl switch to dump transaction without executing it
   - Add a verbose mode to "systemctl start" and friends that explains what is being done or not done
   - "systemctl disable" on a static unit prints no message and does
@@ -739,7 +739,6 @@ Features:
   - maybe introduce WantsMountsFor=? Usecase:
     http://lists.freedesktop.org/archives/systemd-devel/2015-January/027729.html
   - recreate systemd's D-Bus private socket file on SIGUSR2
-  - GC unreferenced jobs (such as .device jobs)
   - move PAM code into its own binary
   - when we automatically restart a service, ensure we restart its rdeps, too.
   - hide PAM options in fragment parser when compile time disabled

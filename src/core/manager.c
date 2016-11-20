@@ -111,6 +111,12 @@ static void manager_watch_jobs_in_progress(Manager *m) {
 
         assert(m);
 
+        /* We do not want to show the cylon animation if the user
+         * needs to confirm service executions otherwise confirmation
+         * messages will be screwed by the cylon animation. */
+        if (!manager_is_confirm_spawn_disabled(m))
+                return;
+
         if (m->jobs_in_progress_event_source)
                 return;
 
@@ -981,10 +987,9 @@ good:
         unit_gc_mark_good(u, gc_marker);
 }
 
-static unsigned manager_dispatch_gc_queue(Manager *m) {
+static unsigned manager_dispatch_gc_unit_queue(Manager *m) {
+        unsigned n = 0, gc_marker;
         Unit *u;
-        unsigned n = 0;
-        unsigned gc_marker;
 
         assert(m);
 
@@ -996,12 +1001,12 @@ static unsigned manager_dispatch_gc_queue(Manager *m) {
 
         gc_marker = m->gc_marker;
 
-        while ((u = m->gc_queue)) {
+        while ((u = m->gc_unit_queue)) {
                 assert(u->in_gc_queue);
 
                 unit_gc_sweep(u, gc_marker);
 
-                LIST_REMOVE(gc_queue, m->gc_queue, u);
+                LIST_REMOVE(gc_queue, m->gc_unit_queue, u);
                 u->in_gc_queue = false;
 
                 n++;
@@ -1015,7 +1020,29 @@ static unsigned manager_dispatch_gc_queue(Manager *m) {
                 }
         }
 
-        m->n_in_gc_queue = 0;
+        return n;
+}
+
+static unsigned manager_dispatch_gc_job_queue(Manager *m) {
+        unsigned n = 0;
+        Job *j;
+
+        assert(m);
+
+        while ((j = m->gc_job_queue)) {
+                assert(j->in_gc_queue);
+
+                LIST_REMOVE(gc_queue, m->gc_job_queue, j);
+                j->in_gc_queue = false;
+
+                n++;
+
+                if (job_check_gc(j))
+                        continue;
+
+                log_unit_debug(j->unit, "Collecting job.");
+                (void) job_finish_and_invalidate(j, JOB_COLLECTED, false, false);
+        }
 
         return n;
 }
@@ -1035,7 +1062,8 @@ static void manager_clear_jobs_and_units(Manager *m) {
         assert(!m->dbus_unit_queue);
         assert(!m->dbus_job_queue);
         assert(!m->cleanup_queue);
-        assert(!m->gc_queue);
+        assert(!m->gc_unit_queue);
+        assert(!m->gc_job_queue);
 
         assert(hashmap_isempty(m->jobs));
         assert(hashmap_isempty(m->units));
@@ -1196,7 +1224,7 @@ static void manager_build_unit_path_cache(Manager *m) {
                 FOREACH_DIRENT(de, d, r = -errno; goto fail) {
                         char *p;
 
-                        p = strjoin(streq(*i, "/") ? "" : *i, "/", de->d_name, NULL);
+                        p = strjoin(streq(*i, "/") ? "" : *i, "/", de->d_name);
                         if (!p) {
                                 r = -ENOMEM;
                                 goto fail;
@@ -2228,7 +2256,10 @@ int manager_loop(Manager *m) {
                 if (manager_dispatch_load_queue(m) > 0)
                         continue;
 
-                if (manager_dispatch_gc_queue(m) > 0)
+                if (manager_dispatch_gc_job_queue(m) > 0)
+                        continue;
+
+                if (manager_dispatch_gc_unit_queue(m) > 0)
                         continue;
 
                 if (manager_dispatch_cleanup_queue(m) > 0)
@@ -2565,6 +2596,7 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
 
         for (;;) {
                 char line[LINE_MAX], *l;
+                const char *val;
 
                 if (!fgets(line, sizeof(line), f)) {
                         if (feof(f))
@@ -2581,63 +2613,63 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                 if (l[0] == 0)
                         break;
 
-                if (startswith(l, "current-job-id=")) {
+                if ((val = startswith(l, "current-job-id="))) {
                         uint32_t id;
 
-                        if (safe_atou32(l+15, &id) < 0)
-                                log_debug("Failed to parse current job id value %s", l+15);
+                        if (safe_atou32(val, &id) < 0)
+                                log_debug("Failed to parse current job id value %s", val);
                         else
                                 m->current_job_id = MAX(m->current_job_id, id);
 
-                } else if (startswith(l, "n-installed-jobs=")) {
+                } else if ((val = startswith(l, "n-installed-jobs="))) {
                         uint32_t n;
 
-                        if (safe_atou32(l+17, &n) < 0)
-                                log_debug("Failed to parse installed jobs counter %s", l+17);
+                        if (safe_atou32(val, &n) < 0)
+                                log_debug("Failed to parse installed jobs counter %s", val);
                         else
                                 m->n_installed_jobs += n;
 
-                } else if (startswith(l, "n-failed-jobs=")) {
+                } else if ((val = startswith(l, "n-failed-jobs="))) {
                         uint32_t n;
 
-                        if (safe_atou32(l+14, &n) < 0)
-                                log_debug("Failed to parse failed jobs counter %s", l+14);
+                        if (safe_atou32(val, &n) < 0)
+                                log_debug("Failed to parse failed jobs counter %s", val);
                         else
                                 m->n_failed_jobs += n;
 
-                } else if (startswith(l, "taint-usr=")) {
+                } else if ((val = startswith(l, "taint-usr="))) {
                         int b;
 
-                        b = parse_boolean(l+10);
+                        b = parse_boolean(val);
                         if (b < 0)
-                                log_debug("Failed to parse taint /usr flag %s", l+10);
+                                log_debug("Failed to parse taint /usr flag %s", val);
                         else
                                 m->taint_usr = m->taint_usr || b;
 
-                } else if (startswith(l, "firmware-timestamp="))
-                        dual_timestamp_deserialize(l+19, &m->firmware_timestamp);
-                else if (startswith(l, "loader-timestamp="))
-                        dual_timestamp_deserialize(l+17, &m->loader_timestamp);
-                else if (startswith(l, "kernel-timestamp="))
-                        dual_timestamp_deserialize(l+17, &m->kernel_timestamp);
-                else if (startswith(l, "initrd-timestamp="))
-                        dual_timestamp_deserialize(l+17, &m->initrd_timestamp);
-                else if (startswith(l, "userspace-timestamp="))
-                        dual_timestamp_deserialize(l+20, &m->userspace_timestamp);
-                else if (startswith(l, "finish-timestamp="))
-                        dual_timestamp_deserialize(l+17, &m->finish_timestamp);
-                else if (startswith(l, "security-start-timestamp="))
-                        dual_timestamp_deserialize(l+25, &m->security_start_timestamp);
-                else if (startswith(l, "security-finish-timestamp="))
-                        dual_timestamp_deserialize(l+26, &m->security_finish_timestamp);
-                else if (startswith(l, "generators-start-timestamp="))
-                        dual_timestamp_deserialize(l+27, &m->generators_start_timestamp);
-                else if (startswith(l, "generators-finish-timestamp="))
-                        dual_timestamp_deserialize(l+28, &m->generators_finish_timestamp);
-                else if (startswith(l, "units-load-start-timestamp="))
-                        dual_timestamp_deserialize(l+27, &m->units_load_start_timestamp);
-                else if (startswith(l, "units-load-finish-timestamp="))
-                        dual_timestamp_deserialize(l+28, &m->units_load_finish_timestamp);
+                } else if ((val = startswith(l, "firmware-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->firmware_timestamp);
+                else if ((val = startswith(l, "loader-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->loader_timestamp);
+                else if ((val = startswith(l, "kernel-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->kernel_timestamp);
+                else if ((val = startswith(l, "initrd-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->initrd_timestamp);
+                else if ((val = startswith(l, "userspace-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->userspace_timestamp);
+                else if ((val = startswith(l, "finish-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->finish_timestamp);
+                else if ((val = startswith(l, "security-start-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->security_start_timestamp);
+                else if ((val = startswith(l, "security-finish-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->security_finish_timestamp);
+                else if ((val = startswith(l, "generators-start-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->generators_start_timestamp);
+                else if ((val = startswith(l, "generators-finish-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->generators_finish_timestamp);
+                else if ((val = startswith(l, "units-load-start-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->units_load_start_timestamp);
+                else if ((val = startswith(l, "units-load-finish-timestamp=")))
+                        dual_timestamp_deserialize(val, &m->units_load_finish_timestamp);
                 else if (startswith(l, "env=")) {
                         _cleanup_free_ char *uce = NULL;
                         char **e;
@@ -2655,21 +2687,21 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                         strv_free(m->environment);
                         m->environment = e;
 
-                } else if (startswith(l, "notify-fd=")) {
+                } else if ((val = startswith(l, "notify-fd="))) {
                         int fd;
 
-                        if (safe_atoi(l + 10, &fd) < 0 || fd < 0 || !fdset_contains(fds, fd))
-                                log_debug("Failed to parse notify fd: %s", l + 10);
+                        if (safe_atoi(val, &fd) < 0 || fd < 0 || !fdset_contains(fds, fd))
+                                log_debug("Failed to parse notify fd: %s", val);
                         else {
                                 m->notify_event_source = sd_event_source_unref(m->notify_event_source);
                                 safe_close(m->notify_fd);
                                 m->notify_fd = fdset_remove(fds, fd);
                         }
 
-                } else if (startswith(l, "notify-socket=")) {
+                } else if ((val = startswith(l, "notify-socket="))) {
                         char *n;
 
-                        n = strdup(l+14);
+                        n = strdup(val);
                         if (!n) {
                                 r = -ENOMEM;
                                 goto finish;
@@ -2678,22 +2710,22 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                         free(m->notify_socket);
                         m->notify_socket = n;
 
-                } else if (startswith(l, "cgroups-agent-fd=")) {
+                } else if ((val = startswith(l, "cgroups-agent-fd="))) {
                         int fd;
 
-                        if (safe_atoi(l + 17, &fd) < 0 || fd < 0 || !fdset_contains(fds, fd))
-                                log_debug("Failed to parse cgroups agent fd: %s", l + 10);
+                        if (safe_atoi(val, &fd) < 0 || fd < 0 || !fdset_contains(fds, fd))
+                                log_debug("Failed to parse cgroups agent fd: %s", val);
                         else {
                                 m->cgroups_agent_event_source = sd_event_source_unref(m->cgroups_agent_event_source);
                                 safe_close(m->cgroups_agent_fd);
                                 m->cgroups_agent_fd = fdset_remove(fds, fd);
                         }
 
-                } else if (startswith(l, "user-lookup=")) {
+                } else if ((val = startswith(l, "user-lookup="))) {
                         int fd0, fd1;
 
-                        if (sscanf(l + 12, "%i %i", &fd0, &fd1) != 2 || fd0 < 0 || fd1 < 0 || fd0 == fd1 || !fdset_contains(fds, fd0) || !fdset_contains(fds, fd1))
-                                log_debug("Failed to parse user lookup fd: %s", l + 12);
+                        if (sscanf(val, "%i %i", &fd0, &fd1) != 2 || fd0 < 0 || fd1 < 0 || fd0 == fd1 || !fdset_contains(fds, fd0) || !fdset_contains(fds, fd1))
+                                log_debug("Failed to parse user lookup fd: %s", val);
                         else {
                                 m->user_lookup_event_source = sd_event_source_unref(m->user_lookup_event_source);
                                 safe_close_pair(m->user_lookup_fds);
@@ -2701,15 +2733,15 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                                 m->user_lookup_fds[1] = fdset_remove(fds, fd1);
                         }
 
-                } else if (startswith(l, "dynamic-user="))
-                        dynamic_user_deserialize_one(m, l + 13, fds);
-                else if (startswith(l, "destroy-ipc-uid="))
-                        manager_deserialize_uid_refs_one(m, l + 16);
-                else if (startswith(l, "destroy-ipc-gid="))
-                        manager_deserialize_gid_refs_one(m, l + 16);
-                else if (startswith(l, "subscribed=")) {
+                } else if ((val = startswith(l, "dynamic-user=")))
+                        dynamic_user_deserialize_one(m, val, fds);
+                else if ((val = startswith(l, "destroy-ipc-uid=")))
+                        manager_deserialize_uid_refs_one(m, val);
+                else if ((val = startswith(l, "destroy-ipc-gid=")))
+                        manager_deserialize_gid_refs_one(m, val);
+                else if ((val = startswith(l, "subscribed="))) {
 
-                        if (strv_extend(&m->deserialized_subscribed, l+11) < 0)
+                        if (strv_extend(&m->deserialized_subscribed, val) < 0)
                                 log_oom();
 
                 } else if (!startswith(l, "kdbus-fd=")) /* ignore this one */
@@ -2967,7 +2999,7 @@ void manager_check_finished(Manager *m) {
         manager_close_idle_pipe(m);
 
         /* Turn off confirm spawn now */
-        m->confirm_spawn = false;
+        m->confirm_spawn = NULL;
 
         /* No need to update ask password status when we're going non-interactive */
         manager_close_ask_password(m);
@@ -3152,6 +3184,49 @@ static bool manager_get_show_status(Manager *m, StatusType type) {
         return false;
 }
 
+const char *manager_get_confirm_spawn(Manager *m) {
+        static int last_errno = 0;
+        const char *vc = m->confirm_spawn;
+        struct stat st;
+        int r;
+
+        /* Here's the deal: we want to test the validity of the console but don't want
+         * PID1 to go through the whole console process which might block. But we also
+         * want to warn the user only once if something is wrong with the console so we
+         * cannot do the sanity checks after spawning our children. So here we simply do
+         * really basic tests to hopefully trap common errors.
+         *
+         * If the console suddenly disappear at the time our children will really it
+         * then they will simply fail to acquire it and a positive answer will be
+         * assumed. New children will fallback to /dev/console though.
+         *
+         * Note: TTYs are devices that can come and go any time, and frequently aren't
+         * available yet during early boot (consider a USB rs232 dongle...). If for any
+         * reason the configured console is not ready, we fallback to the default
+         * console. */
+
+        if (!vc || path_equal(vc, "/dev/console"))
+                return vc;
+
+        r = stat(vc, &st);
+        if (r < 0)
+                goto fail;
+
+        if (!S_ISCHR(st.st_mode)) {
+                errno = ENOTTY;
+                goto fail;
+        }
+
+        last_errno = 0;
+        return vc;
+fail:
+        if (last_errno != errno) {
+                last_errno = errno;
+                log_warning_errno(errno, "Failed to open %s: %m, using default console", vc);
+        }
+        return "/dev/console";
+}
+
 void manager_set_first_boot(Manager *m, bool b) {
         assert(m);
 
@@ -3166,6 +3241,17 @@ void manager_set_first_boot(Manager *m, bool b) {
         }
 
         m->first_boot = b;
+}
+
+void manager_disable_confirm_spawn(void) {
+        (void) touch("/run/systemd/confirm_spawn_disabled");
+}
+
+bool manager_is_confirm_spawn_disabled(Manager *m) {
+        if (!m->confirm_spawn)
+                return true;
+
+        return access("/run/systemd/confirm_spawn_disabled", F_OK) >= 0;
 }
 
 void manager_status_printf(Manager *m, StatusType type, const char *status, const char *format, ...) {

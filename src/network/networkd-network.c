@@ -27,8 +27,8 @@
 #include "fd-util.h"
 #include "hostname-util.h"
 #include "network-internal.h"
+#include "networkd-manager.h"
 #include "networkd-network.h"
-#include "networkd.h"
 #include "parse-util.h"
 #include "set.h"
 #include "stat-util.h"
@@ -368,10 +368,9 @@ int network_get(Manager *manager, struct udev_device *device,
         return -ENOENT;
 }
 
-int network_apply(Manager *manager, Network *network, Link *link) {
+int network_apply(Network *network, Link *link) {
         int r;
 
-        assert(manager);
         assert(network);
         assert(link);
 
@@ -1003,7 +1002,7 @@ int config_parse_dns(
                 union in_addr_union a;
                 int family;
 
-                r = extract_first_word(&rvalue, &w, WHITESPACE, EXTRACT_QUOTES|EXTRACT_RETAIN_ESCAPE);
+                r = extract_first_word(&rvalue, &w, NULL, EXTRACT_QUOTES|EXTRACT_RETAIN_ESCAPE);
                 if (r == 0)
                         break;
                 if (r == -ENOMEM)

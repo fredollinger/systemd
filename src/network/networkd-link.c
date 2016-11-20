@@ -29,8 +29,8 @@
 #include "netlink-util.h"
 #include "network-internal.h"
 #include "networkd-lldp-tx.h"
+#include "networkd-manager.h"
 #include "networkd-ndisc.h"
-#include "networkd.h"
 #include "set.h"
 #include "socket-util.h"
 #include "stdio-util.h"
@@ -514,12 +514,11 @@ static void link_free(Link *link) {
         sd_lldp_unref(link->lldp);
         free(link->lldp_file);
 
+        ndisc_flush(link);
+
         sd_ipv4ll_unref(link->ipv4ll);
         sd_dhcp6_client_unref(link->dhcp6_client);
         sd_ndisc_unref(link->ndisc);
-
-        set_free_free(link->ndisc_rdnss);
-        set_free_free(link->ndisc_dnssl);
 
         if (link->manager)
                 hashmap_remove(link->manager->links, INT_TO_PTR(link->ifindex));
@@ -2427,6 +2426,8 @@ static int link_drop_config(Link *link) {
                         return r;
         }
 
+        ndisc_flush(link);
+
         return 0;
 }
 
@@ -2631,7 +2632,7 @@ static int link_initialized_and_synced(sd_netlink *rtnl, sd_netlink_message *m,
                                 log_link_debug(link, "Ignoring DHCP server for loopback link");
                 }
 
-                r = network_apply(link->manager, network, link);
+                r = network_apply(network, link);
                 if (r < 0)
                         return r;
         }
@@ -2727,7 +2728,7 @@ static int link_load(Link *link) {
                         goto network_file_fail;
                 }
 
-                r = network_apply(link->manager, network, link);
+                r = network_apply(network, link);
                 if (r < 0)
                         return log_link_error_errno(link, r, "Failed to apply network %s: %m", basename(network_file));
         }

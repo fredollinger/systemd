@@ -24,7 +24,9 @@
 #include "dhcp-lease-internal.h"
 #include "hostname-util.h"
 #include "network-internal.h"
-#include "networkd.h"
+#include "networkd-link.h"
+#include "networkd-manager.h"
+#include "networkd-network.h"
 
 static int dhcp4_route_handler(sd_netlink *rtnl, sd_netlink_message *m,
                                void *userdata) {
@@ -626,6 +628,12 @@ int dhcp4_configure(Link *link) {
         if (link->network->dhcp_vendor_class_identifier) {
                 r = sd_dhcp_client_set_vendor_class_identifier(link->dhcp_client,
                                                                link->network->dhcp_vendor_class_identifier);
+                if (r < 0)
+                        return r;
+        }
+
+        if (link->network->dhcp_client_port) {
+                r = sd_dhcp_client_set_client_port(link->dhcp_client, link->network->dhcp_client_port);
                 if (r < 0)
                         return r;
         }

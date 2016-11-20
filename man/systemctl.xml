@@ -209,6 +209,10 @@
           <varname>RequiresMountsFor=</varname>). Both explicitly
           and implicitly introduced dependencies are shown with
           <command>list-dependencies</command>.</para>
+
+          <para>When passed to the <command>list-jobs</command> command, for each printed job show which other jobs are
+          waiting for it. May be combined with <option>--before</option> to show both the jobs waiting for each job as
+          well as all jobs each job is waiting for.</para>
         </listitem>
       </varlistentry>
 
@@ -220,6 +224,10 @@
           units that are ordered after the specified unit. In other
           words, recursively list units following the
           <varname>Before=</varname> dependency.</para>
+
+          <para>When passed to the <command>list-jobs</command> command, for each printed job show which other jobs it
+          is waiting for. May be combined with <option>--after</option> to show both the jobs waiting for each job as
+          well as all jobs each job is waiting for.</para>
         </listitem>
       </varlistentry>
 
@@ -877,8 +885,8 @@ kobject-uevent 1 systemd-udevd-kernel.socket systemd-udevd.service
             <para>Show properties of one or more units, jobs, or the
             manager itself. If no argument is specified, properties of
             the manager will be shown. If a unit name is specified,
-            properties of the unit is shown, and if a job ID is
-            specified, properties of the job is shown. By default, empty
+            properties of the unit are shown, and if a job ID is
+            specified, properties of the job are shown. By default, empty
             properties are suppressed. Use <option>--all</option> to
             show those too. To select specific properties to show, use
             <option>--property=</option>. This command is intended to be
@@ -1265,7 +1273,7 @@ kobject-uevent 1 systemd-udevd-kernel.socket systemd-udevd.service
             <literal>foo.service.d/</literal> with all their contained files are removed, both below the persistent and
             runtime configuration directories (i.e. below <filename>/etc/systemd/system</filename> and
             <filename>/run/systemd/system</filename>); if the unit file has a vendor-supplied version (i.e. a unit file
-            located below <filename>/usr</filename>) any matching peristent or runtime unit file that overrides it is
+            located below <filename>/usr</filename>) any matching persistent or runtime unit file that overrides it is
             removed, too. Note that if a unit file has no vendor-supplied version (i.e. is only defined below
             <filename>/etc/systemd/system</filename> or <filename>/run/systemd/system</filename>, but not in a unit
             file stored below <filename>/usr</filename>), then it is not removed. Also, if a unit is masked, it is
@@ -1388,6 +1396,10 @@ kobject-uevent 1 systemd-udevd-kernel.socket systemd-udevd.service
             <para>List jobs that are in progress. If one or more
             <replaceable>PATTERN</replaceable>s are specified, only
             jobs for units matching one of them are shown.</para>
+
+            <para>When combined with <option>--after</option> or <option>--before</option> the list is augmented with
+            information on which other job each job is waiting for, and which other jobs are waiting for it, see
+            above.</para>
           </listitem>
         </varlistentry>
         <varlistentry>

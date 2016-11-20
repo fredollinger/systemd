@@ -219,6 +219,18 @@ static void test_exec_systemcallerrornumber(Manager *m) {
 #endif
 }
 
+static void test_exec_restrict_namespaces(Manager *m) {
+#ifdef HAVE_SECCOMP
+        if (!is_seccomp_available())
+                return;
+
+        test(m, "exec-restrict-namespaces-no.service", 0, CLD_EXITED);
+        test(m, "exec-restrict-namespaces-yes.service", 1, CLD_EXITED);
+        test(m, "exec-restrict-namespaces-mnt.service", 0, CLD_EXITED);
+        test(m, "exec-restrict-namespaces-mnt-blacklist.service", 1, CLD_EXITED);
+#endif
+}
+
 static void test_exec_systemcall_system_mode_with_user(Manager *m) {
 #ifdef HAVE_SECCOMP
         if (!is_seccomp_available())
@@ -257,6 +269,12 @@ static void test_exec_supplementary_groups(Manager *m) {
         test(m, "exec-supplementarygroups-multiple-groups-default-group-user.service", 0, CLD_EXITED);
         test(m, "exec-supplementarygroups-multiple-groups-withgid.service", 0, CLD_EXITED);
         test(m, "exec-supplementarygroups-multiple-groups-withuid.service", 0, CLD_EXITED);
+}
+
+static void test_exec_dynamic_user(Manager *m) {
+        test(m, "exec-dynamicuser-fixeduser.service", 0, CLD_EXITED);
+        test(m, "exec-dynamicuser-fixeduser-one-supplementarygroup.service", 0, CLD_EXITED);
+        test(m, "exec-dynamicuser-supplementarygroups.service", 0, CLD_EXITED);
 }
 
 static void test_exec_environment(Manager *m) {
@@ -429,9 +447,11 @@ int main(int argc, char *argv[]) {
                 test_exec_privatenetwork,
                 test_exec_systemcallfilter,
                 test_exec_systemcallerrornumber,
+                test_exec_restrict_namespaces,
                 test_exec_user,
                 test_exec_group,
                 test_exec_supplementary_groups,
+                test_exec_dynamic_user,
                 test_exec_environment,
                 test_exec_environmentfile,
                 test_exec_passenvironment,

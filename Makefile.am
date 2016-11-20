@@ -42,9 +42,9 @@ LIBUDEV_CURRENT=7
 LIBUDEV_REVISION=5
 LIBUDEV_AGE=6
 
-LIBSYSTEMD_CURRENT=16
+LIBSYSTEMD_CURRENT=17
 LIBSYSTEMD_REVISION=0
-LIBSYSTEMD_AGE=16
+LIBSYSTEMD_AGE=17
 
 # Dirs of external packages
 dbuspolicydir=@dbuspolicydir@
@@ -633,7 +633,6 @@ EXTRA_DIST += \
 	units/halt-local.service.in
 
 GENERAL_ALIASES += \
-	$(systemunitdir)/reboot.target $(pkgsysconfdir)/system/ctrl-alt-del.target \
 	$(systemunitdir)/machines.target $(pkgsysconfdir)/system/multi-user.target.wants/machines.target
 
 dist_doc_DATA = \
@@ -932,7 +931,7 @@ libbasic_la_SOURCES = \
 	src/basic/copy.h \
 	src/basic/alloc-util.h \
 	src/basic/alloc-util.c \
-	src/basic/formats-util.h \
+	src/basic/format-util.h \
 	src/basic/nss-util.h
 
 nodist_libbasic_la_SOURCES = \
@@ -1046,7 +1045,9 @@ libshared_la_SOURCES = \
 	src/shared/tests.h \
 	src/shared/tests.c \
 	src/shared/fdset.c \
-	src/shared/fdset.h
+	src/shared/fdset.h \
+	src/shared/nsflags.h \
+	src/shared/nsflags.c
 
 if HAVE_UTMP
 libshared_la_SOURCES += \
@@ -1626,6 +1627,9 @@ EXTRA_DIST += \
 	test/test-execute/exec-supplementarygroups-multiple-groups-default-group-user.service \
 	test/test-execute/exec-supplementarygroups-multiple-groups-withgid.service \
 	test/test-execute/exec-supplementarygroups-multiple-groups-withuid.service \
+	test/test-execute/exec-dynamicuser-fixeduser.service \
+	test/test-execute/exec-dynamicuser-fixeduser-one-supplementarygroup.service \
+	test/test-execute/exec-dynamicuser-supplementarygroups.service \
 	test/test-execute/exec-ignoresigpipe-no.service \
 	test/test-execute/exec-ignoresigpipe-yes.service \
 	test/test-execute/exec-personality-x86-64.service \
@@ -1680,6 +1684,10 @@ EXTRA_DIST += \
 	test/test-execute/exec-runtimedirectory-mode.service \
 	test/test-execute/exec-runtimedirectory-owner.service \
 	test/test-execute/exec-runtimedirectory-owner-nfsnobody.service \
+	test/test-execute/exec-restrict-namespaces-no.service \
+	test/test-execute/exec-restrict-namespaces-yes.service \
+	test/test-execute/exec-restrict-namespaces-mnt.service \
+	test/test-execute/exec-restrict-namespaces-mnt-blacklist.service \
 	test/bus-policy/hello.conf \
 	test/bus-policy/methods.conf \
 	test/bus-policy/ownerships.conf \
@@ -2035,7 +2043,8 @@ test_seccomp_SOURCES = \
 	src/test/test-seccomp.c
 
 test_seccomp_LDADD = \
-	libsystemd-shared.la
+	libsystemd-shared.la \
+	$(SECCOMP_LIBS)
 
 test_namespace_LDADD = \
 	libcore.la
@@ -5605,37 +5614,39 @@ libnetworkd_core_la_CFLAGS = \
 
 libnetworkd_core_la_SOURCES = \
 	src/libsystemd-network/network-internal.h \
-	src/network/networkd.h \
+	src/network/netdev/netdev.h \
+	src/network/netdev/netdev.c \
+	src/network/netdev/vrf.h \
+	src/network/netdev/vrf.c \
+	src/network/netdev/tunnel.h \
+	src/network/netdev/tunnel.c \
+	src/network/netdev/veth.h \
+	src/network/netdev/veth.c \
+	src/network/netdev/vxlan.h \
+	src/network/netdev/vxlan.c \
+	src/network/netdev/vlan.h \
+	src/network/netdev/vlan.c \
+	src/network/netdev/macvlan.h \
+	src/network/netdev/macvlan.c \
+	src/network/netdev/ipvlan.h \
+	src/network/netdev/ipvlan.c \
+	src/network/netdev/dummy.h \
+	src/network/netdev/dummy.c \
+	src/network/netdev/tuntap.h \
+	src/network/netdev/tuntap.c \
+	src/network/netdev/bond.h \
+	src/network/netdev/bond.c \
+	src/network/netdev/bridge.h \
+	src/network/netdev/bridge.c \
+	src/network/netdev/vcan.h \
+	src/network/netdev/vcan.c \
+	src/network/networkd-manager.h \
+	src/network/networkd-manager.c \
+	src/network/networkd-manager-bus.c \
 	src/network/networkd-conf.h \
 	src/network/networkd-conf.c \
 	src/network/networkd-link.h \
 	src/network/networkd-link.c \
-	src/network/networkd-netdev.h \
-	src/network/networkd-netdev.c \
-	src/network/networkd-netdev-vrf.h \
-	src/network/networkd-netdev-vrf.c \
-	src/network/networkd-netdev-tunnel.h \
-	src/network/networkd-netdev-tunnel.c \
-	src/network/networkd-netdev-veth.h \
-	src/network/networkd-netdev-veth.c \
-	src/network/networkd-netdev-vxlan.h \
-	src/network/networkd-netdev-vxlan.c \
-	src/network/networkd-netdev-vlan.h \
-	src/network/networkd-netdev-vlan.c \
-	src/network/networkd-netdev-macvlan.h \
-	src/network/networkd-netdev-macvlan.c \
-	src/network/networkd-netdev-ipvlan.h \
-	src/network/networkd-netdev-ipvlan.c \
-	src/network/networkd-netdev-dummy.h \
-	src/network/networkd-netdev-dummy.c \
-	src/network/networkd-netdev-tuntap.h \
-	src/network/networkd-netdev-tuntap.c \
-	src/network/networkd-netdev-bond.h \
-	src/network/networkd-netdev-bond.c \
-	src/network/networkd-netdev-bridge.h \
-	src/network/networkd-netdev-bridge.c \
-	src/network/networkd-netdev-vcan.h \
-	src/network/networkd-netdev-vcan.c \
 	src/network/networkd-link-bus.c \
 	src/network/networkd-ipv4ll.c \
 	src/network/networkd-dhcp4.c \
@@ -5649,8 +5660,6 @@ libnetworkd_core_la_SOURCES = \
 	src/network/networkd-address.c \
 	src/network/networkd-route.h \
 	src/network/networkd-route.c \
-	src/network/networkd-manager.c \
-	src/network/networkd-manager-bus.c \
 	src/network/networkd-fdb.h \
 	src/network/networkd-fdb.c \
 	src/network/networkd-brvlan.h \
@@ -5665,7 +5674,7 @@ libnetworkd_core_la_SOURCES = \
 nodist_libnetworkd_core_la_SOURCES = \
 	src/network/networkd-gperf.c \
 	src/network/networkd-network-gperf.c \
-	src/network/networkd-netdev-gperf.c
+	src/network/netdev/netdev-gperf.c
 
 libnetworkd_core_la_LIBADD = \
 	libsystemd-network.la \
@@ -5679,11 +5688,11 @@ systemd_networkd_wait_online_CFLAGS = \
 
 systemd_networkd_wait_online_SOURCES = \
 	src/libsystemd-network/network-internal.h \
-	src/network/networkd-wait-online.h \
-	src/network/networkd-wait-online-link.h \
-	src/network/networkd-wait-online.c \
-	src/network/networkd-wait-online-manager.c \
-	src/network/networkd-wait-online-link.c
+	src/network/wait-online/link.h \
+	src/network/wait-online/link.c \
+	src/network/wait-online/manager.h \
+	src/network/wait-online/manager.c \
+	src/network/wait-online/wait-online.c
 
 systemd_networkd_wait_online_LDADD = \
 	libsystemd-network.la \
@@ -5769,7 +5778,7 @@ endif
 gperf_gperf_sources += \
 	src/network/networkd-gperf.gperf \
 	src/network/networkd-network-gperf.gperf \
-	src/network/networkd-netdev-gperf.gperf
+	src/network/netdev/netdev-gperf.gperf
 
 EXTRA_DIST += \
 	units/systemd-networkd.service.m4.in \
@@ -6050,6 +6059,7 @@ EXTRA_DIST += \
 
 # ------------------------------------------------------------------------------
 substitutions = \
+       '|rootlibdir=$(rootlibdir)|' \
        '|rootlibexecdir=$(rootlibexecdir)|' \
        '|rootbindir=$(rootbindir)|' \
        '|bindir=$(bindir)|' \

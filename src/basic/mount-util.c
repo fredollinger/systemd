@@ -525,6 +525,7 @@ bool fstype_is_network(const char *fstype) {
                 "glusterfs\0"
                 "pvfs2\0" /* OrangeFS */
                 "ocfs2\0"
+                "lustre\0"
                 ;
 
         const char *x;
@@ -641,7 +642,7 @@ static char* mount_flags_to_string(long unsigned flags) {
                     FLAG(MS_I_VERSION),
                     FLAG(MS_STRICTATIME),
                     FLAG(MS_LAZYTIME),
-                    y, NULL);
+                    y);
         if (!x)
                 return NULL;
         if (!y)

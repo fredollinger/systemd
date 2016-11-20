@@ -34,14 +34,17 @@ bool is_seccomp_available(void);
 
 typedef struct SyscallFilterSet {
         const char *name;
+        const char *help;
         const char *value;
 } SyscallFilterSet;
 
 enum {
+        /* Please leave DEFAULT first, but sort the rest alphabetically */
+        SYSCALL_FILTER_SET_DEFAULT,
+        SYSCALL_FILTER_SET_BASIC_IO,
         SYSCALL_FILTER_SET_CLOCK,
         SYSCALL_FILTER_SET_CPU_EMULATION,
         SYSCALL_FILTER_SET_DEBUG,
-        SYSCALL_FILTER_SET_DEFAULT,
         SYSCALL_FILTER_SET_IO_EVENT,
         SYSCALL_FILTER_SET_IPC,
         SYSCALL_FILTER_SET_KEYRING,
@@ -52,6 +55,7 @@ enum {
         SYSCALL_FILTER_SET_PRIVILEGED,
         SYSCALL_FILTER_SET_PROCESS,
         SYSCALL_FILTER_SET_RAW_IO,
+        SYSCALL_FILTER_SET_RESOURCES,
         _SYSCALL_FILTER_SET_MAX
 };
 
@@ -62,3 +66,5 @@ const SyscallFilterSet *syscall_filter_set_find(const char *name);
 int seccomp_add_syscall_filter_set(scmp_filter_ctx seccomp, const SyscallFilterSet *set, uint32_t action);
 
 int seccomp_load_filter_set(uint32_t default_action, const SyscallFilterSet *set, uint32_t action);
+
+int seccomp_restrict_namespaces(unsigned long retain);
