@@ -63,6 +63,8 @@ struct Manager {
         usec_t network_dirs_ts_usec;
 
         DUID duid;
+        char* dynamic_hostname;
+        char* dynamic_timezone;
 };
 
 static inline const DUID* link_duid(const Link *link) {
@@ -74,11 +76,11 @@ static inline const DUID* link_duid(const Link *link) {
 
 extern const sd_bus_vtable manager_vtable[];
 
-int manager_new(Manager **ret);
+int manager_new(Manager **ret, sd_event *event);
 void manager_free(Manager *m);
 
 int manager_connect_bus(Manager *m);
-int manager_run(Manager *m);
+int manager_start(Manager *m);
 
 int manager_load_config(Manager *m);
 bool manager_should_reload(Manager *m);
@@ -96,6 +98,9 @@ void manager_dirty(Manager *m);
 int manager_address_pool_acquire(Manager *m, int family, unsigned prefixlen, union in_addr_union *found);
 
 Link* manager_find_uplink(Manager *m, Link *exclude);
+
+int manager_set_hostname(Manager *m, const char *hostname);
+int manager_set_timezone(Manager *m, const char *timezone);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Manager*, manager_free);
 #define _cleanup_manager_free_ _cleanup_(manager_freep)

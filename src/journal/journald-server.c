@@ -144,7 +144,7 @@ static int cache_space_refresh(Server *s, JournalStorage *storage) {
 
         ts = now(CLOCK_MONOTONIC);
 
-        if (space->timestamp + RECHECK_SPACE_USEC > ts)
+        if (space->timestamp != 0 && space->timestamp + RECHECK_SPACE_USEC > ts)
                 return 0;
 
         r = determine_path_usage(s, storage->path, &vfs_used, &vfs_avail);
@@ -1480,7 +1480,7 @@ static int setup_signals(Server *s) {
 
         assert(s);
 
-        assert(sigprocmask_many(SIG_SETMASK, NULL, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGRTMIN+1, -1) >= 0);
+        assert_se(sigprocmask_many(SIG_SETMASK, NULL, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGRTMIN+1, -1) >= 0);
 
         r = sd_event_add_signal(s->event, &s->sigusr1_event_source, SIGUSR1, dispatch_sigusr1, s);
         if (r < 0)

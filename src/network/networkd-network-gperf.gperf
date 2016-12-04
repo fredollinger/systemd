@@ -29,6 +29,7 @@ Match.Architecture,                     config_parse_net_condition,             
 Link.MACAddress,                        config_parse_hwaddr,                            0,                             offsetof(Network, mac)
 Link.MTUBytes,                          config_parse_iec_size,                          0,                             offsetof(Network, mtu)
 Link.ARP,                               config_parse_tristate,                          0,                             offsetof(Network, arp)
+Link.Unmanaged,                         config_parse_bool,                              0,                             offsetof(Network, unmanaged)
 Network.Description,                    config_parse_string,                            0,                             offsetof(Network, description)
 Network.Bridge,                         config_parse_netdev,                            0,                             offsetof(Network, bridge)
 Network.Bond,                           config_parse_netdev,                            0,                             offsetof(Network, bond)
@@ -54,7 +55,7 @@ Network.LLMNR,                          config_parse_resolve_support,           
 Network.MulticastDNS,                   config_parse_resolve_support,                   0,                             offsetof(Network, mdns)
 Network.DNSSEC,                         config_parse_dnssec_mode,                       0,                             offsetof(Network, dnssec_mode)
 Network.DNSSECNegativeTrustAnchors,     config_parse_dnssec_negative_trust_anchors,     0,                             0
-Network.NTP,                            config_parse_strv,                              0,                             offsetof(Network, ntp)
+Network.NTP,                            config_parse_ntp,                               0,                             offsetof(Network, ntp)
 Network.IPForward,                      config_parse_address_family_boolean_with_kernel,0,                             offsetof(Network, ip_forward)
 Network.IPMasquerade,                   config_parse_bool,                              0,                             offsetof(Network, ip_masquerade)
 Network.IPv6PrivacyExtensions,          config_parse_ipv6_privacy_extensions,           0,                             offsetof(Network, ipv6_privacy_extensions)

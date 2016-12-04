@@ -280,14 +280,9 @@ static void help(void) {
                , program_invocation_short_name);
 }
 
-static int custom_mounts_prepare(void) {
+static int custom_mount_check_all(void) {
         unsigned i;
-        int r;
 
-        /* Ensure the mounts are applied prefix first. */
-        qsort_safe(arg_custom_mounts, arg_n_custom_mounts, sizeof(CustomMount), custom_mount_compare);
-
-        /* Allocate working directories for the overlay file systems that need it */
         for (i = 0; i < arg_n_custom_mounts; i++) {
                 CustomMount *m = &arg_custom_mounts[i];
 
@@ -301,19 +296,6 @@ static int custom_mounts_prepare(void) {
                                 return -EINVAL;
                         }
                 }
-
-                if (m->type != CUSTOM_MOUNT_OVERLAY)
-                        continue;
-
-                if (m->work_dir)
-                        continue;
-
-                if (m->read_only)
-                        continue;
-
-                r = tempfn_random(m->source, NULL, &m->work_dir);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to generate work directory from %s: %m", m->source);
         }
 
         return 0;
@@ -789,69 +771,15 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_OVERLAY:
-                case ARG_OVERLAY_RO: {
-                        _cleanup_free_ char *upper = NULL, *destination = NULL;
-                        _cleanup_strv_free_ char **lower = NULL;
-                        CustomMount *m;
-                        unsigned n = 0;
-                        char **i;
-
-                        r = strv_split_extract(&lower, optarg, ":", EXTRACT_DONT_COALESCE_SEPARATORS);
-                        if (r == -ENOMEM)
-                                return log_oom();
-                        else if (r < 0) {
-                                log_error("Invalid overlay specification: %s", optarg);
-                                return r;
-                        }
-
-                        STRV_FOREACH(i, lower) {
-                                if (!path_is_absolute(*i)) {
-                                        log_error("Overlay path %s is not absolute.", *i);
-                                        return -EINVAL;
-                                }
-
-                                n++;
-                        }
-
-                        if (n < 2) {
-                                log_error("--overlay= needs at least two colon-separated directories specified.");
-                                return -EINVAL;
-                        }
-
-                        if (n == 2) {
-                                /* If two parameters are specified,
-                                 * the first one is the lower, the
-                                 * second one the upper directory. And
-                                 * we'll also define the destination
-                                 * mount point the same as the upper. */
-                                upper = lower[1];
-                                lower[1] = NULL;
-
-                                destination = strdup(upper);
-                                if (!destination)
-                                        return log_oom();
-
-                        } else {
-                                upper = lower[n - 2];
-                                destination = lower[n - 1];
-                                lower[n - 2] = NULL;
-                        }
-
-                        m = custom_mount_add(&arg_custom_mounts, &arg_n_custom_mounts, CUSTOM_MOUNT_OVERLAY);
-                        if (!m)
-                                return log_oom();
-
-                        m->destination = destination;
-                        m->source = upper;
-                        m->lower = lower;
-                        m->read_only = c == ARG_OVERLAY_RO;
-
-                        upper = destination = NULL;
-                        lower = NULL;
+                case ARG_OVERLAY_RO:
+                        r = overlay_mount_parse(&arg_custom_mounts, &arg_n_custom_mounts, optarg, c == ARG_OVERLAY_RO);
+                        if (r == -EADDRNOTAVAIL)
+                                return log_error_errno(r, "--overlay(-ro)= needs at least two colon-separated directories specified.");
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse --overlay(-ro)= argument %s: %m", optarg);
 
                         arg_settings_mask |= SETTING_CUSTOM_MOUNTS;
                         break;
-                }
 
                 case 'E': {
                         char **n;
@@ -1133,6 +1061,16 @@ static int parse_argv(int argc, char *argv[]) {
                 return -EINVAL;
         }
 
+        if (arg_ephemeral && arg_template && !arg_directory) {
+                /* User asked for ephemeral execution but specified --template= instead of --directory=. Semantically
+                 * such an invocation makes some sense, see https://github.com/systemd/systemd/issues/3667. Let's
+                 * accept this here, and silently make "--ephemeral --template=" equivalent to "--ephemeral
+                 * --directory=". */
+
+                arg_directory = arg_template;
+                arg_template = NULL;
+        }
+
         if (arg_template && !(arg_directory || arg_machine)) {
                 log_error("--template= needs --directory= or --machine=.");
                 return -EINVAL;
@@ -1140,11 +1078,6 @@ static int parse_argv(int argc, char *argv[]) {
 
         if (arg_ephemeral && arg_template) {
                 log_error("--ephemeral and --template= may not be combined.");
-                return -EINVAL;
-        }
-
-        if (arg_ephemeral && arg_image) {
-                log_error("--ephemeral and --image= may not be combined.");
                 return -EINVAL;
         }
 
@@ -1195,6 +1128,10 @@ static int parse_argv(int argc, char *argv[]) {
                 arg_use_cgns = cg_ns_supported();
         else
                 arg_use_cgns = r;
+
+        r = custom_mount_check_all();
+        if (r < 0)
+                return r;
 
         return 1;
 }
@@ -1671,7 +1608,7 @@ static int setup_journal(const char *directory) {
         p = strjoina("/var/log/journal/", id);
         q = prefix_roota(directory, p);
 
-        if (path_is_mount_point(p, 0) > 0) {
+        if (path_is_mount_point(p, NULL, 0) > 0) {
                 if (try)
                         return 0;
 
@@ -1679,7 +1616,7 @@ static int setup_journal(const char *directory) {
                 return -EEXIST;
         }
 
-        if (path_is_mount_point(q, 0) > 0) {
+        if (path_is_mount_point(q, NULL, 0) > 0) {
                 if (try)
                         return 0;
 
@@ -2605,7 +2542,7 @@ static int determine_names(void) {
                         r = image_find(arg_machine, &i);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to find image for machine '%s': %m", arg_machine);
-                        else if (r == 0) {
+                        if (r == 0) {
                                 log_error("No image for machine '%s': %m", arg_machine);
                                 return -ENOENT;
                         }
@@ -2615,14 +2552,14 @@ static int determine_names(void) {
                         else
                                 r = free_and_strdup(&arg_directory, i->path);
                         if (r < 0)
-                                return log_error_errno(r, "Invalid image directory: %m");
+                                return log_oom();
 
                         if (!arg_ephemeral)
                                 arg_read_only = arg_read_only || i->read_only;
                 } else
                         arg_directory = get_current_dir_name();
 
-                if (!arg_directory && !arg_machine) {
+                if (!arg_directory && !arg_image) {
                         log_error("Failed to determine path, please use -D or -i.");
                         return -EINVAL;
                 }
@@ -2633,7 +2570,6 @@ static int determine_names(void) {
                         arg_machine = gethostname_malloc();
                 else
                         arg_machine = strdup(basename(arg_image ?: arg_directory));
-
                 if (!arg_machine)
                         return log_oom();
 
@@ -2658,6 +2594,25 @@ static int determine_names(void) {
                         arg_machine = b;
                 }
         }
+
+        return 0;
+}
+
+static int chase_symlinks_and_update(char **p, unsigned flags) {
+        char *chased;
+        int r;
+
+        assert(p);
+
+        if (!*p)
+                return 0;
+
+        r = chase_symlinks(*p, NULL, flags, &chased);
+        if (r < 0)
+                return log_error_errno(r, "Failed to resolve path %s: %m", *p);
+
+        free(*p);
+        *p = chased;
 
         return 0;
 }
@@ -3663,7 +3618,7 @@ static int run(int master,
 
         static const struct sigaction sa = {
                 .sa_handler = nop_signal_handler,
-                .sa_flags = SA_NOCLDSTOP,
+                .sa_flags = SA_NOCLDSTOP|SA_RESTART,
         };
 
         _cleanup_release_lock_file_ LockFile uid_shift_lock = LOCK_FILE_INIT;
@@ -3795,7 +3750,6 @@ static int run(int master,
                 l = recv(uid_shift_socket_pair[0], &arg_uid_shift, sizeof arg_uid_shift, 0);
                 if (l < 0)
                         return log_error_errno(errno, "Failed to read UID shift: %m");
-
                 if (l != sizeof arg_uid_shift) {
                         log_error("Short read while reading UID shift.");
                         return -EIO;
@@ -4029,7 +3983,7 @@ static int run(int master,
                 terminate_machine(*pid);
 
         /* Normally redundant, but better safe than sorry */
-        kill(*pid, SIGKILL);
+        (void) kill(*pid, SIGKILL);
 
         r = wait_for_container(*pid, &container_status);
         *pid = 0;
@@ -4077,11 +4031,12 @@ int main(int argc, char *argv[]) {
         _cleanup_fdset_free_ FDSet *fds = NULL;
         int r, n_fd_passed, loop_nr = -1, ret = EXIT_SUCCESS;
         char veth_name[IFNAMSIZ] = "";
-        bool secondary = false, remove_subvol = false;
+        bool secondary = false, remove_directory = false, remove_image = false;
         pid_t pid = 0;
         union in_addr_union exposed = {};
         _cleanup_release_lock_file_ LockFile tree_global_lock = LOCK_FILE_INIT, tree_local_lock = LOCK_FILE_INIT;
-        bool interactive, veth_created = false;
+        bool interactive, veth_created = false, remove_tmprootdir = false;
+        char tmprootdir[] = "/tmp/nspawn-root-XXXXXX";
 
         log_parse_environment();
         log_open();
@@ -4132,13 +4087,17 @@ int main(int argc, char *argv[]) {
                 if (arg_ephemeral) {
                         _cleanup_free_ char *np = NULL;
 
+                        r = chase_symlinks_and_update(&arg_directory, 0);
+                        if (r < 0)
+                                goto finish;
+
                         /* If the specified path is a mount point we
                          * generate the new snapshot immediately
                          * inside it under a random name. However if
                          * the specified is not a mount point we
                          * create the new snapshot in the parent
                          * directory, just next to it. */
-                        r = path_is_mount_point(arg_directory, 0);
+                        r = path_is_mount_point(arg_directory, NULL, 0);
                         if (r < 0) {
                                 log_error_errno(r, "Failed to determine whether directory %s is mount point: %m", arg_directory);
                                 goto finish;
@@ -4148,7 +4107,7 @@ int main(int argc, char *argv[]) {
                         else
                                 r = tempfn_random(arg_directory, "machine.", &np);
                         if (r < 0) {
-                                log_error_errno(r, "Failed to generate name for snapshot: %m");
+                                log_error_errno(r, "Failed to generate name for directory snapshot: %m");
                                 goto finish;
                         }
 
@@ -4158,7 +4117,12 @@ int main(int argc, char *argv[]) {
                                 goto finish;
                         }
 
-                        r = btrfs_subvol_snapshot(arg_directory, np, (arg_read_only ? BTRFS_SNAPSHOT_READ_ONLY : 0) | BTRFS_SNAPSHOT_FALLBACK_COPY | BTRFS_SNAPSHOT_RECURSIVE | BTRFS_SNAPSHOT_QUOTA);
+                        r = btrfs_subvol_snapshot(arg_directory, np,
+                                                  (arg_read_only ? BTRFS_SNAPSHOT_READ_ONLY : 0) |
+                                                  BTRFS_SNAPSHOT_FALLBACK_COPY |
+                                                  BTRFS_SNAPSHOT_FALLBACK_DIRECTORY |
+                                                  BTRFS_SNAPSHOT_RECURSIVE |
+                                                  BTRFS_SNAPSHOT_QUOTA);
                         if (r < 0) {
                                 log_error_errno(r, "Failed to create snapshot %s from %s: %m", np, arg_directory);
                                 goto finish;
@@ -4168,9 +4132,13 @@ int main(int argc, char *argv[]) {
                         arg_directory = np;
                         np = NULL;
 
-                        remove_subvol = true;
+                        remove_directory = true;
 
                 } else {
+                        r = chase_symlinks_and_update(&arg_directory, arg_template ? CHASE_NONEXISTENT : 0);
+                        if (r < 0)
+                                goto finish;
+
                         r = image_path_lock(arg_directory, (arg_read_only ? LOCK_SH : LOCK_EX) | LOCK_NB, &tree_global_lock, &tree_local_lock);
                         if (r == -EBUSY) {
                                 log_error_errno(r, "Directory tree %s is currently busy.", arg_directory);
@@ -4182,7 +4150,17 @@ int main(int argc, char *argv[]) {
                         }
 
                         if (arg_template) {
-                                r = btrfs_subvol_snapshot(arg_template, arg_directory, (arg_read_only ? BTRFS_SNAPSHOT_READ_ONLY : 0) | BTRFS_SNAPSHOT_FALLBACK_COPY | BTRFS_SNAPSHOT_RECURSIVE | BTRFS_SNAPSHOT_QUOTA);
+                                r = chase_symlinks_and_update(&arg_template, 0);
+                                if (r < 0)
+                                        goto finish;
+
+                                r = btrfs_subvol_snapshot(arg_template, arg_directory,
+                                                          (arg_read_only ? BTRFS_SNAPSHOT_READ_ONLY : 0) |
+                                                          BTRFS_SNAPSHOT_FALLBACK_COPY |
+                                                          BTRFS_SNAPSHOT_FALLBACK_DIRECTORY |
+                                                          BTRFS_SNAPSHOT_FALLBACK_IMMUTABLE |
+                                                          BTRFS_SNAPSHOT_RECURSIVE |
+                                                          BTRFS_SNAPSHOT_QUOTA);
                                 if (r == -EEXIST) {
                                         if (!arg_quiet)
                                                 log_info("Directory %s already exists, not populating from template %s.", arg_directory, arg_template);
@@ -4214,28 +4192,59 @@ int main(int argc, char *argv[]) {
                 }
 
         } else {
-                char template[] = "/tmp/nspawn-root-XXXXXX";
-
                 assert(arg_image);
                 assert(!arg_template);
 
-                r = image_path_lock(arg_image, (arg_read_only ? LOCK_SH : LOCK_EX) | LOCK_NB, &tree_global_lock, &tree_local_lock);
-                if (r == -EBUSY) {
-                        r = log_error_errno(r, "Disk image %s is currently busy.", arg_image);
+                r = chase_symlinks_and_update(&arg_image, 0);
+                if (r < 0)
                         goto finish;
+
+                if (arg_ephemeral)  {
+                        _cleanup_free_ char *np = NULL;
+
+                        r = tempfn_random(arg_image, "machine.", &np);
+                        if (r < 0) {
+                                log_error_errno(r, "Failed to generate name for image snapshot: %m");
+                                goto finish;
+                        }
+
+                        r = image_path_lock(np, (arg_read_only ? LOCK_SH : LOCK_EX) | LOCK_NB, &tree_global_lock, &tree_local_lock);
+                        if (r < 0) {
+                                r = log_error_errno(r, "Failed to create image lock: %m");
+                                goto finish;
+                        }
+
+                        r = copy_file(arg_image, np, O_EXCL, arg_read_only ? 0400 : 0600, FS_NOCOW_FL);
+                        if (r < 0) {
+                                r = log_error_errno(r, "Failed to copy image file: %m");
+                                goto finish;
+                        }
+
+                        free(arg_image);
+                        arg_image = np;
+                        np = NULL;
+
+                        remove_image = true;
+                } else {
+                        r = image_path_lock(arg_image, (arg_read_only ? LOCK_SH : LOCK_EX) | LOCK_NB, &tree_global_lock, &tree_local_lock);
+                        if (r == -EBUSY) {
+                                r = log_error_errno(r, "Disk image %s is currently busy.", arg_image);
+                                goto finish;
+                        }
+                        if (r < 0) {
+                                r = log_error_errno(r, "Failed to create image lock: %m");
+                                goto finish;
+                        }
                 }
-                if (r < 0) {
-                        r = log_error_errno(r, "Failed to create image lock: %m");
+
+                if (!mkdtemp(tmprootdir)) {
+                        r = log_error_errno(errno, "Failed to create temporary directory: %m");
                         goto finish;
                 }
 
-                if (!mkdtemp(template)) {
-                        log_error_errno(errno, "Failed to create temporary directory: %m");
-                        r = -errno;
-                        goto finish;
-                }
+                remove_tmprootdir = true;
 
-                arg_directory = strdup(template);
+                arg_directory = strdup(tmprootdir);
                 if (!arg_directory) {
                         r = log_oom();
                         goto finish;
@@ -4255,9 +4264,13 @@ int main(int argc, char *argv[]) {
                                   &secondary);
                 if (r < 0)
                         goto finish;
+
+                /* Now that we mounted the image, let's try to remove it again, if it is ephemeral */
+                if (remove_image && unlink(arg_image) >= 0)
+                        remove_image = false;
         }
 
-        r = custom_mounts_prepare();
+        r = custom_mount_prepare_all(arg_directory, arg_custom_mounts, arg_n_custom_mounts);
         if (r < 0)
                 goto finish;
 
@@ -4321,20 +4334,35 @@ finish:
                                                         "STOPPING=1\nSTATUS=Terminating...");
 
         if (pid > 0)
-                kill(pid, SIGKILL);
+                (void) kill(pid, SIGKILL);
 
         /* Try to flush whatever is still queued in the pty */
-        if (master >= 0)
+        if (master >= 0) {
                 (void) copy_bytes(master, STDOUT_FILENO, (uint64_t) -1, false);
+                master = safe_close(master);
+        }
+
+        if (pid > 0)
+                (void) wait_for_terminate(pid, NULL);
 
         loop_remove(loop_nr, &image_fd);
 
-        if (remove_subvol && arg_directory) {
+        if (remove_directory && arg_directory) {
                 int k;
 
-                k = btrfs_subvol_remove(arg_directory, BTRFS_REMOVE_RECURSIVE|BTRFS_REMOVE_QUOTA);
+                k = rm_rf(arg_directory, REMOVE_ROOT|REMOVE_PHYSICAL|REMOVE_SUBVOLUME);
                 if (k < 0)
-                        log_warning_errno(k, "Cannot remove subvolume '%s', ignoring: %m", arg_directory);
+                        log_warning_errno(k, "Cannot remove '%s', ignoring: %m", arg_directory);
+        }
+
+        if (remove_image && arg_image) {
+                if (unlink(arg_image) < 0)
+                        log_warning_errno(errno, "Can't remove image file '%s', ignoring: %m", arg_image);
+        }
+
+        if (remove_tmprootdir) {
+                if (rmdir(tmprootdir) < 0)
+                        log_debug_errno(errno, "Can't remove temporary root directory '%s', ignoring: %m", tmprootdir);
         }
 
         if (arg_machine) {

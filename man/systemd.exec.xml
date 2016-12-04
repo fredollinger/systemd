@@ -1356,6 +1356,10 @@
                 <entry>Debugging, performance monitoring and tracing functionality (<citerefentry project='man-pages'><refentrytitle>ptrace</refentrytitle><manvolnum>2</manvolnum></citerefentry>, <citerefentry project='man-pages'><refentrytitle>perf_event_open</refentrytitle><manvolnum>2</manvolnum></citerefentry> and related calls)</entry>
               </row>
               <row>
+                <entry>@file-system</entry>
+                <entry>File system operations: opening, creating files and directories for read and write, renaming and removing them, reading file properties, or creating hard and symbolic links.</entry>
+              </row>
+              <row>
                 <entry>@io-event</entry>
                 <entry>Event loop system calls (<citerefentry project='man-pages'><refentrytitle>poll</refentrytitle><manvolnum>2</manvolnum></citerefentry>, <citerefentry project='man-pages'><refentrytitle>select</refentrytitle><manvolnum>2</manvolnum></citerefentry>, <citerefentry project='man-pages'><refentrytitle>epoll</refentrytitle><manvolnum>7</manvolnum></citerefentry>, <citerefentry project='man-pages'><refentrytitle>eventfd</refentrytitle><manvolnum>2</manvolnum></citerefentry> and related calls)</entry>
               </row>
@@ -1767,14 +1771,15 @@
 
         <listitem><para>Only defined for the service unit type, this environment variable is passed to all
         <varname>ExecStop=</varname> and <varname>ExecStopPost=</varname> processes, and encodes the service
-        "result". Currently, the following values are defined: <literal>timeout</literal> (in case of an operation
-        timeout), <literal>exit-code</literal> (if a service process exited with a non-zero exit code; see
-        <varname>$EXIT_CODE</varname> below for the actual exit code returned), <literal>signal</literal> (if a
-        service process was terminated abnormally by a signal; see <varname>$EXIT_CODE</varname> below for the actual
-        signal used for the termination), <literal>core-dump</literal> (if a service process terminated abnormally and
-        dumped core), <literal>watchdog</literal> (if the watchdog keep-alive ping was enabled for the service but it
-        missed the deadline), or <literal>resources</literal> (a catch-all condition in case a system operation
-        failed).</para>
+        "result". Currently, the following values are defined: <literal>protocol</literal> (in case of a protocol
+        violation; if a service did not take the steps required by its unit configuration), <literal>timeout</literal>
+        (in case of an operation timeout), <literal>exit-code</literal> (if a service process exited with a non-zero
+        exit code; see <varname>$EXIT_CODE</varname> below for the actual exit code returned), <literal>signal</literal>
+        (if a service process was terminated abnormally by a signal; see <varname>$EXIT_CODE</varname> below for the
+        actual signal used for the termination), <literal>core-dump</literal> (if a service process terminated
+        abnormally and dumped core), <literal>watchdog</literal> (if the watchdog keep-alive ping was enabled for the
+        service but it missed the deadline), or <literal>resources</literal> (a catch-all condition in case a system
+        operation failed).</para>
 
         <para>This environment variable is useful to monitor failure or successful termination of a service. Even
         though this variable is available in both <varname>ExecStop=</varname> and <varname>ExecStopPost=</varname>, it

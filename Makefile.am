@@ -55,6 +55,8 @@ pamconfdir=@pamconfdir@
 pkgconfigdatadir=$(datadir)/pkgconfig
 pkgconfiglibdir=$(libdir)/pkgconfig
 polkitpolicydir=$(datadir)/polkit-1/actions
+polkitrulesdir=$(datadir)/polkit-1/rules.d
+polkitpkladir=$(localstatedir)/lib/polkit-1/localauthority/10-vendor.d
 bashcompletiondir=@bashcompletiondir@
 zshcompletiondir=@zshcompletiondir@
 rpmmacrosdir=$(prefix)/lib/rpm/macros.d
@@ -116,6 +118,8 @@ pkgconfiglib_DATA =
 polkitpolicy_in_in_files =
 polkitpolicy_in_files =
 polkitpolicy_files =
+polkitrules_files =
+polkitpkla_files =
 dist_udevrules_DATA =
 nodist_udevrules_DATA =
 dist_pkgsysconf_DATA =
@@ -525,6 +529,7 @@ nodist_systemunit_DATA = \
 	units/serial-getty@.service \
 	units/console-getty.service \
 	units/container-getty@.service \
+	units/system-update-cleanup.service \
 	units/systemd-initctl.service \
 	units/systemd-remount-fs.service \
 	units/systemd-ask-password-wall.service \
@@ -588,6 +593,7 @@ EXTRA_DIST += \
 	units/console-getty.service.m4.in \
 	units/container-getty@.service.m4.in \
 	units/rescue.service.in \
+	units/system-update-cleanup.service.in \
 	units/systemd-initctl.service.in \
 	units/systemd-remount-fs.service.in \
 	units/systemd-update-utmp.service.in \
@@ -3893,7 +3899,8 @@ EXTRA_DIST += \
 # ------------------------------------------------------------------------------
 if ENABLE_TESTS
 TESTS += \
-	test/udev-test.pl
+	test/udev-test.pl \
+	test/hwdb-test.sh
 
 if HAVE_PYTHON
 TESTS += \
@@ -3948,6 +3955,7 @@ DISTCLEAN_LOCAL_HOOKS += test-sys-distclean
 EXTRA_DIST += \
 	test/sys.tar.xz \
 	test/udev-test.pl \
+	test/hwdb-test.sh \
 	test/rule-syntax-check.py \
 	test/sysv-generator-test.py \
 	test/mocks/fsck \
@@ -5711,6 +5719,9 @@ networkctl_LDADD = \
 dist_bashcompletion_data += \
 	shell-completion/bash/networkctl
 
+dist_zshcompletion_data += \
+	shell-completion/zsh/_networkctl
+
 test_networkd_conf_SOURCES = \
 	src/network/test-networkd-conf.c
 
@@ -5773,6 +5784,12 @@ SYSTEM_UNIT_ALIASES += \
 BUSNAMES_TARGET_WANTS += \
 	org.freedesktop.network1.busname
 
+polkitrules_files += \
+	src/network/systemd-networkd.rules
+
+polkitpkla_files += \
+	src/network/systemd-networkd.pkla
+
 endif
 
 gperf_gperf_sources += \
@@ -5781,6 +5798,8 @@ gperf_gperf_sources += \
 	src/network/netdev/netdev-gperf.gperf
 
 EXTRA_DIST += \
+	src/network/systemd-networkd.rules \
+	src/network/systemd-networkd.pkla \
 	units/systemd-networkd.service.m4.in \
 	units/systemd-networkd-wait-online.service.in \
 	test/networkd-test.py
@@ -6189,6 +6208,8 @@ if ENABLE_POLKIT
 nodist_polkitpolicy_DATA = \
 	$(polkitpolicy_files) \
 	$(polkitpolicy_in_in_files:.policy.in.in=.policy)
+polkitrules_DATA = $(polkitrules_files)
+polkitpkla_DATA = $(polkitpkla_files)
 endif
 
 EXTRA_DIST += \
