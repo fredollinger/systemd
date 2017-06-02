@@ -112,9 +112,10 @@ int fd_is_mount_point(int fd, const char *filename, int flags) {
 
         r = name_to_handle_at(fd, filename, &h.handle, &mount_id, flags);
         if (r < 0) {
-                if (errno == ENOSYS)
-                        /* This kernel does not support name_to_handle_at()
-                         * fall back to simpler logic. */
+                if (IN_SET(errno, ENOSYS, EACCES, EPERM))
+                        /* This kernel does not support name_to_handle_at() at all, or the syscall was blocked (maybe
+                         * through seccomp, because we are running inside of a container?): fall back to simpler
+                         * logic. */
                         goto fallback_fdinfo;
                 else if (errno == EOPNOTSUPP)
                         /* This kernel or file system does not support
@@ -163,7 +164,7 @@ int fd_is_mount_point(int fd, const char *filename, int flags) {
 
 fallback_fdinfo:
         r = fd_fdinfo_mnt_id(fd, filename, flags, &mount_id);
-        if (IN_SET(r, -EOPNOTSUPP, -EACCES))
+        if (IN_SET(r, -EOPNOTSUPP, -EACCES, -EPERM))
                 goto fallback_fstat;
         if (r < 0)
                 return r;
@@ -316,10 +317,15 @@ static int get_mount_flags(const char *path, unsigned long *flags) {
         return 0;
 }
 
-int bind_remount_recursive(const char *prefix, bool ro, char **blacklist) {
+/* Use this function only if do you have direct access to /proc/self/mountinfo
+ * and need the caller to open it for you. This is the case when /proc is
+ * masked or not mounted. Otherwise, use bind_remount_recursive. */
+int bind_remount_recursive_with_mountinfo(const char *prefix, bool ro, char **blacklist, FILE *proc_self_mountinfo) {
         _cleanup_set_free_free_ Set *done = NULL;
         _cleanup_free_ char *cleaned = NULL;
         int r;
+
+        assert(proc_self_mountinfo);
 
         /* Recursively remount a directory (and all its submounts) read-only or read-write. If the directory is already
          * mounted, we reuse the mount and simply mark it MS_BIND|MS_RDONLY (or remove the MS_RDONLY for read-write
@@ -343,7 +349,6 @@ int bind_remount_recursive(const char *prefix, bool ro, char **blacklist) {
                 return -ENOMEM;
 
         for (;;) {
-                _cleanup_fclose_ FILE *proc_self_mountinfo = NULL;
                 _cleanup_set_free_free_ Set *todo = NULL;
                 bool top_autofs = false;
                 char *x;
@@ -353,9 +358,7 @@ int bind_remount_recursive(const char *prefix, bool ro, char **blacklist) {
                 if (!todo)
                         return -ENOMEM;
 
-                proc_self_mountinfo = fopen("/proc/self/mountinfo", "re");
-                if (!proc_self_mountinfo)
-                        return -errno;
+                rewind(proc_self_mountinfo);
 
                 for (;;) {
                         _cleanup_free_ char *path = NULL, *p = NULL, *type = NULL;
@@ -492,6 +495,16 @@ int bind_remount_recursive(const char *prefix, bool ro, char **blacklist) {
                         log_debug("Remounted %s read-only.", x);
                 }
         }
+}
+
+int bind_remount_recursive(const char *prefix, bool ro, char **blacklist) {
+        _cleanup_fclose_ FILE *proc_self_mountinfo = NULL;
+
+        proc_self_mountinfo = fopen("/proc/self/mountinfo", "re");
+        if (!proc_self_mountinfo)
+                return -errno;
+
+        return bind_remount_recursive_with_mountinfo(prefix, ro, blacklist, proc_self_mountinfo);
 }
 
 int mount_move_root(const char *path) {
@@ -673,6 +686,9 @@ int mount_verbose(
         else if ((flags & MS_BIND) && !type)
                 log_debug("Bind-mounting %s on %s (%s \"%s\")...",
                           what, where, strnull(fl), strempty(options));
+        else if (flags & MS_MOVE)
+                log_debug("Moving mount %s → %s (%s \"%s\")...",
+                          what, where, strnull(fl), strempty(options));
         else
                 log_debug("Mounting %s on %s (%s \"%s\")...",
                           strna(type), where, strnull(fl), strempty(options));
@@ -687,5 +703,37 @@ int umount_verbose(const char *what) {
         log_debug("Umounting %s...", what);
         if (umount(what) < 0)
                 return log_error_errno(errno, "Failed to unmount %s: %m", what);
+        return 0;
+}
+
+const char *mount_propagation_flags_to_string(unsigned long flags) {
+
+        switch (flags & (MS_SHARED|MS_SLAVE|MS_PRIVATE)) {
+        case 0:
+                return "";
+        case MS_SHARED:
+                return "shared";
+        case MS_SLAVE:
+                return "slave";
+        case MS_PRIVATE:
+                return "private";
+        }
+
+        return NULL;
+}
+
+
+int mount_propagation_flags_from_string(const char *name, unsigned long *ret) {
+
+        if (isempty(name))
+                *ret = 0;
+        else if (streq(name, "shared"))
+                *ret = MS_SHARED;
+        else if (streq(name, "slave"))
+                *ret = MS_SLAVE;
+        else if (streq(name, "private"))
+                *ret = MS_PRIVATE;
+        else
+                return -EINVAL;
         return 0;
 }

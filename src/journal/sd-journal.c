@@ -1661,6 +1661,9 @@ static int add_search_paths(sd_journal *j) {
         NULSTR_FOREACH(p, search_paths)
                 (void) add_root_directory(j, p, true);
 
+        if (!(j->flags & SD_JOURNAL_LOCAL_ONLY))
+                (void) add_root_directory(j, "/var/log/journal/remote", true);
+
         return 0;
 }
 
@@ -2421,6 +2424,7 @@ _public_ int sd_journal_process(sd_journal *j) {
         assert_return(!journal_pid_changed(j), -ECHILD);
 
         j->last_process_usec = now(CLOCK_MONOTONIC);
+        j->last_invalidate_counter = j->current_invalidate_counter;
 
         for (;;) {
                 union inotify_event_buffer buffer;

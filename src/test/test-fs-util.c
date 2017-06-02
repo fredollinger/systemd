@@ -78,6 +78,7 @@ static void test_chase_symlinks(void) {
 
         assert_se(mkdir(q, 0700) >= 0);
 
+        result = mfree(result);
         r = chase_symlinks(p, temp, 0, &result);
         assert_se(r > 0);
         assert_se(path_equal(result, q));
@@ -183,6 +184,13 @@ static void test_chase_symlinks(void) {
         assert_se(r == -ENOENT);
 
         r = chase_symlinks(p, NULL, CHASE_NONEXISTENT, &result);
+        assert_se(r == -ENOENT);
+
+        p = strjoina(temp, "/target");
+        q = strjoina(temp, "/top");
+        assert_se(symlink(q, p) >= 0);
+        p = strjoina(temp, "/target/idontexist");
+        r = chase_symlinks(p, NULL, 0, &result);
         assert_se(r == -ENOENT);
 
         assert_se(rm_rf(temp, REMOVE_ROOT|REMOVE_PHYSICAL) >= 0);
@@ -297,12 +305,23 @@ static void test_var_tmp(void) {
         }
 }
 
+static void test_dot_or_dot_dot(void) {
+        assert_se(!dot_or_dot_dot(NULL));
+        assert_se(!dot_or_dot_dot(""));
+        assert_se(!dot_or_dot_dot("xxx"));
+        assert_se(dot_or_dot_dot("."));
+        assert_se(dot_or_dot_dot(".."));
+        assert_se(!dot_or_dot_dot(".foo"));
+        assert_se(!dot_or_dot_dot("..foo"));
+}
+
 int main(int argc, char *argv[]) {
         test_unlink_noerrno();
         test_readlink_and_make_absolute();
         test_get_files_in_directory();
         test_var_tmp();
         test_chase_symlinks();
+        test_dot_or_dot_dot();
 
         return 0;
 }

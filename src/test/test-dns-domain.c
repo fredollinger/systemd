@@ -373,16 +373,16 @@ static void test_dns_name_is_valid(void) {
         test_dns_name_is_valid_one("ä", 1);
         test_dns_name_is_valid_one("\n", 0);
 
-        /* 256 characters*/
+        /* 256 characters */
         test_dns_name_is_valid_one("a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345", 0);
 
-        /* 255 characters*/
+        /* 255 characters */
         test_dns_name_is_valid_one("a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a1234", 0);
 
-        /* 254 characters*/
+        /* 254 characters */
         test_dns_name_is_valid_one("a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a123", 0);
 
-        /* 253 characters*/
+        /* 253 characters */
         test_dns_name_is_valid_one("a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12", 1);
 
         /* label of 64 chars length */
@@ -608,7 +608,7 @@ static void test_dns_name_common_suffix(void) {
 }
 
 static void test_dns_name_apply_idna_one(const char *s, const char *result) {
-#ifdef HAVE_LIBIDN
+#if defined(HAVE_LIBIDN2) || defined(HAVE_LIBIDN)
         _cleanup_free_ char *buf = NULL;
         assert_se(dns_name_apply_idna(s, &buf) >= 0);
         assert_se(dns_name_equal(buf, result) > 0);

@@ -54,6 +54,7 @@ typedef int (decompress_sw_t)(const void *src, uint64_t src_size,
 typedef int (compress_stream_t)(int fdf, int fdt, uint64_t max_bytes);
 typedef int (decompress_stream_t)(int fdf, int fdt, uint64_t max_size);
 
+#if defined(HAVE_XZ) || defined(HAVE_LZ4)
 static void test_compress_decompress(int compression,
                                      compress_blob_t compress,
                                      decompress_blob_t decompress,
@@ -109,7 +110,7 @@ static void test_decompress_startswith(int compression,
         size_t csize, usize = 0, len;
         int r;
 
-        log_info("/* testing decompress_startswith with %s on %.20s text*/",
+        log_info("/* testing decompress_startswith with %s on %.20s text */",
                  object_compressed_to_string(compression), data);
 
 #define BUFSIZE_1 512
@@ -203,6 +204,7 @@ static void test_compress_stream(int compression,
         assert_se(unlink(pattern) == 0);
         assert_se(unlink(pattern2) == 0);
 }
+#endif
 
 #ifdef HAVE_LZ4
 static void test_lz4_decompress_partial(void) {
@@ -216,7 +218,11 @@ static void test_lz4_decompress_partial(void) {
         memset(huge, 'x', HUGE_SIZE);
         memcpy(huge, "HUGE=", 5);
 
+#if LZ4_VERSION_NUMBER >= 10700
+        r = LZ4_compress_default(huge, buf, HUGE_SIZE, buf_size);
+#else
         r = LZ4_compress_limitedOutput(huge, buf, HUGE_SIZE, buf_size);
+#endif
         assert_se(r >= 0);
         compressed = r;
         log_info("Compressed %i → %zu", HUGE_SIZE, compressed);
@@ -243,6 +249,7 @@ static void test_lz4_decompress_partial(void) {
 #endif
 
 int main(int argc, char *argv[]) {
+#if defined(HAVE_XZ) || defined(HAVE_LZ4)
         const char text[] =
                 "text\0foofoofoofoo AAAA aaaaaaaaa ghost busters barbarbar FFF"
                 "foofoofoofoo AAAA aaaaaaaaa ghost busters barbarbar FFF";
@@ -308,4 +315,7 @@ int main(int argc, char *argv[]) {
 #endif
 
         return 0;
+#else
+        return EXIT_TEST_SKIP;
+#endif
 }

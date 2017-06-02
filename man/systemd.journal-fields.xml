@@ -87,7 +87,7 @@
           recommended to be a UUID-compatible ID, but this is not
           enforced, and formatted differently. Developers can generate
           a new ID for this purpose with <command>journalctl
-          <option>--new-id</option></command>.
+          <option>--new-id128</option></command>.
           </para>
         </listitem>
       </varlistentry>
@@ -156,7 +156,9 @@
         <listitem>
           <para>The process, user, and group ID of the process the
           journal entry originates from formatted as a decimal
-          string.</para>
+          string. Note that entries obtained via <literal>stdout</literal> or
+          <literal>stderr</literal> of forked processes will contain credentials valid for a parent
+          process (that initiated the connection to <command>systemd-journald</command>).</para>
         </listitem>
       </varlistentry>
 
@@ -239,6 +241,16 @@
           <para>The machine ID of the originating host, as available
           in
           <citerefentry><refentrytitle>machine-id</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>_SYSTEMD_INVOCATION_ID=</varname></term>
+        <listitem>
+          <para>The invocation ID for the runtime cycle of the unit
+          the message was generated in, as available to processes
+          of the unit in <varname>$INVOCATION_ID</varname> (see
+          <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>).</para>
         </listitem>
       </varlistentry>
 
@@ -457,9 +469,9 @@
 
     <para>During serialization into external formats, such as the
     <ulink
-    url="http://www.freedesktop.org/wiki/Software/systemd/export">Journal
+    url="https://www.freedesktop.org/wiki/Software/systemd/export">Journal
     Export Format</ulink> or the <ulink
-    url="http://www.freedesktop.org/wiki/Software/systemd/json">Journal
+    url="https://www.freedesktop.org/wiki/Software/systemd/json">Journal
     JSON Format</ulink>, the addresses of journal entries are
     serialized into fields prefixed with double underscores. Note that
     these are not proper fields when stored in the journal but for

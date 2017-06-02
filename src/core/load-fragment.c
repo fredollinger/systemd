@@ -49,6 +49,7 @@
 #include "load-fragment.h"
 #include "log.h"
 #include "missing.h"
+#include "mount-util.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -391,7 +392,9 @@ int config_parse_socket_listen(const char *unit,
 
                 r = socket_address_parse_and_warn(&p->address, k);
                 if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse address value, ignoring: %s", rvalue);
+                        if (r != -EAFNOSUPPORT)
+                                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse address value, ignoring: %s", rvalue);
+
                         return 0;
                 }
 
@@ -579,6 +582,7 @@ int config_parse_exec(
                 void *userdata) {
 
         ExecCommand **e = data;
+        Unit *u = userdata;
         const char *p;
         bool semicolon;
         int r;
@@ -604,8 +608,7 @@ int config_parse_exec(
                 _cleanup_free_ ExecCommand *nce = NULL;
                 _cleanup_strv_free_ char **n = NULL;
                 size_t nlen = 0, nbufsize = 0;
-                char *f;
-                int i;
+                const char *f;
 
                 semicolon = false;
 
@@ -614,12 +617,12 @@ int config_parse_exec(
                         return 0;
 
                 f = firstword;
-                for (i = 0; i < 3; i++) {
+                for (;;) {
                         /* We accept an absolute path as first argument.
                          * If it's prefixed with - and the path doesn't exist,
                          * we ignore it instead of erroring out;
                          * if it's prefixed with @, we allow overriding of argv[0];
-                         * and if it's prefixed with !, it will be run with full privileges */
+                         * and if it's prefixed with +, it will be run with full privileges */
                         if (*f == '-' && !ignore)
                                 ignore = true;
                         else if (*f == '@' && !separate_argv0)
@@ -631,47 +634,47 @@ int config_parse_exec(
                         f++;
                 }
 
-                if (isempty(f)) {
+                r = unit_full_printf(u, f, &path);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve unit specifiers on %s, ignoring: %m", f);
+                        return 0;
+                }
+
+                if (isempty(path)) {
                         /* First word is either "-" or "@" with no command. */
                         log_syntax(unit, LOG_ERR, filename, line, 0, "Empty path in command line, ignoring: \"%s\"", rvalue);
                         return 0;
                 }
-                if (!string_is_safe(f)) {
+                if (!string_is_safe(path)) {
                         log_syntax(unit, LOG_ERR, filename, line, 0, "Executable path contains special characters, ignoring: %s", rvalue);
                         return 0;
                 }
-                if (!path_is_absolute(f)) {
+                if (!path_is_absolute(path)) {
                         log_syntax(unit, LOG_ERR, filename, line, 0, "Executable path is not absolute, ignoring: %s", rvalue);
                         return 0;
                 }
-                if (endswith(f, "/")) {
+                if (endswith(path, "/")) {
                         log_syntax(unit, LOG_ERR, filename, line, 0, "Executable path specifies a directory, ignoring: %s", rvalue);
                         return 0;
                 }
 
-                if (f == firstword) {
-                        path = firstword;
-                        firstword = NULL;
-                } else {
-                        path = strdup(f);
-                        if (!path)
-                                return log_oom();
-                }
-
                 if (!separate_argv0) {
+                        char *w = NULL;
+
                         if (!GREEDY_REALLOC(n, nbufsize, nlen + 2))
                                 return log_oom();
-                        f = strdup(path);
-                        if (!f)
+
+                        w = strdup(path);
+                        if (!w)
                                 return log_oom();
-                        n[nlen++] = f;
+                        n[nlen++] = w;
                         n[nlen] = NULL;
                 }
 
                 path_kill_slashes(path);
 
                 while (!isempty(p)) {
-                        _cleanup_free_ char *word = NULL;
+                        _cleanup_free_ char *word = NULL, *resolved = NULL;
 
                         /* Check explicitly for an unquoted semicolon as
                          * command separator token.  */
@@ -682,18 +685,21 @@ int config_parse_exec(
                                 break;
                         }
 
-                        /* Check for \; explicitly, to not confuse it with \\;
-                         * or "\;" or "\\;" etc.  extract_first_word would
-                         * return the same for all of those.  */
+                        /* Check for \; explicitly, to not confuse it with \\; or "\;" or "\\;" etc.
+                         * extract_first_word() would return the same for all of those.  */
                         if (p[0] == '\\' && p[1] == ';' && (!p[2] || strchr(WHITESPACE, p[2]))) {
+                                char *w;
+
                                 p += 2;
                                 p += strspn(p, WHITESPACE);
+
                                 if (!GREEDY_REALLOC(n, nbufsize, nlen + 2))
                                         return log_oom();
-                                f = strdup(";");
-                                if (!f)
+
+                                w = strdup(";");
+                                if (!w)
                                         return log_oom();
-                                n[nlen++] = f;
+                                n[nlen++] = w;
                                 n[nlen] = NULL;
                                 continue;
                         }
@@ -701,14 +707,20 @@ int config_parse_exec(
                         r = extract_first_word_and_warn(&p, &word, NULL, EXTRACT_QUOTES|EXTRACT_CUNESCAPE, unit, filename, line, rvalue);
                         if (r == 0)
                                 break;
-                        else if (r < 0)
+                        if (r < 0)
                                 return 0;
+
+                        r = unit_full_printf(u, word, &resolved);
+                        if (r < 0) {
+                                log_syntax(unit, LOG_ERR, filename, line, 0, "Failed to resolve unit specifiers on %s, ignoring: %m", word);
+                                return 0;
+                        }
 
                         if (!GREEDY_REALLOC(n, nbufsize, nlen + 2))
                                 return log_oom();
-                        n[nlen++] = word;
+                        n[nlen++] = resolved;
                         n[nlen] = NULL;
-                        word = NULL;
+                        resolved = NULL;
                 }
 
                 if (!n || !n[0]) {
@@ -1255,38 +1267,30 @@ int config_parse_sysv_priority(const char *unit,
 DEFINE_CONFIG_PARSE_ENUM(config_parse_exec_utmp_mode, exec_utmp_mode, ExecUtmpMode, "Failed to parse utmp mode");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_kill_mode, kill_mode, KillMode, "Failed to parse kill mode");
 
-int config_parse_exec_mount_flags(const char *unit,
-                                  const char *filename,
-                                  unsigned line,
-                                  const char *section,
-                                  unsigned section_line,
-                                  const char *lvalue,
-                                  int ltype,
-                                  const char *rvalue,
-                                  void *data,
-                                  void *userdata) {
+int config_parse_exec_mount_flags(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
 
 
-        unsigned long flags = 0;
         ExecContext *c = data;
+        int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
         assert(data);
 
-        if (streq(rvalue, "shared"))
-                flags = MS_SHARED;
-        else if (streq(rvalue, "slave"))
-                flags = MS_SLAVE;
-        else if (streq(rvalue, "private"))
-                flags = MS_PRIVATE;
-        else {
+        r = mount_propagation_flags_from_string(rvalue, &c->mount_flags);
+        if (r < 0)
                 log_syntax(unit, LOG_ERR, filename, line, 0, "Failed to parse mount flag %s, ignoring.", rvalue);
-                return 0;
-        }
-
-        c->mount_flags = flags;
 
         return 0;
 }
@@ -1326,7 +1330,7 @@ int config_parse_exec_selinux_context(
         } else
                 ignore = false;
 
-        r = unit_name_printf(u, rvalue, &k);
+        r = unit_full_printf(u, rvalue, &k);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve specifiers, ignoring: %m");
                 return 0;
@@ -1374,7 +1378,7 @@ int config_parse_exec_apparmor_profile(
         } else
                 ignore = false;
 
-        r = unit_name_printf(u, rvalue, &k);
+        r = unit_full_printf(u, rvalue, &k);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve specifiers, ignoring: %m");
                 return 0;
@@ -1422,7 +1426,7 @@ int config_parse_exec_smack_process_label(
         } else
                 ignore = false;
 
-        r = unit_name_printf(u, rvalue, &k);
+        r = unit_full_printf(u, rvalue, &k);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve specifiers, ignoring: %m");
                 return 0;
@@ -1689,7 +1693,7 @@ int config_parse_fdname(
                 return 0;
         }
 
-        r = unit_name_printf(UNIT(s), rvalue, &p);
+        r = unit_full_printf(UNIT(s), rvalue, &p);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve specifiers, ignoring: %s", rvalue);
                 return 0;
@@ -2555,7 +2559,7 @@ int config_parse_unit_requires_mounts_for(
         assert(data);
 
         for (p = rvalue;; ) {
-                _cleanup_free_ char *word = NULL;
+                _cleanup_free_ char *word = NULL, *resolved = NULL;
 
                 r = extract_first_word(&p, &word, NULL, EXTRACT_QUOTES);
                 if (r == 0)
@@ -2573,9 +2577,15 @@ int config_parse_unit_requires_mounts_for(
                         continue;
                 }
 
-                r = unit_require_mounts_for(u, word);
+                r = unit_full_printf(u, word, &resolved);
                 if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to add required mount \"%s\", ignoring: %m", word);
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve unit name \"%s\", ignoring: %m", word);
+                        continue;
+                }
+
+                r = unit_require_mounts_for(u, resolved);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to add required mount \"%s\", ignoring: %m", resolved);
                         continue;
                 }
         }
@@ -3710,7 +3720,7 @@ int config_parse_runtime_directory(
                         return 0;
                 }
 
-                r = unit_name_printf(u, word, &k);
+                r = unit_full_printf(u, word, &k);
                 if (r < 0) {
                         log_syntax(unit, LOG_ERR, filename, line, r,
                                    "Failed to resolve specifiers in \"%s\", ignoring: %m", word);
@@ -3812,8 +3822,8 @@ int config_parse_namespace_path_strv(
                 void *data,
                 void *userdata) {
 
+        Unit *u = userdata;
         char*** sv = data;
-        const char *prev;
         const char *cur;
         int r;
 
@@ -3828,10 +3838,11 @@ int config_parse_namespace_path_strv(
                 return 0;
         }
 
-        prev = cur = rvalue;
+        cur = rvalue;
         for (;;) {
-                _cleanup_free_ char *word = NULL;
-                int offset;
+                _cleanup_free_ char *word = NULL, *resolved = NULL, *joined = NULL;
+                const char *w;
+                bool ignore_enoent = false, shall_prefix = false;
 
                 r = extract_first_word(&cur, &word, NULL, EXTRACT_QUOTES);
                 if (r == 0)
@@ -3839,31 +3850,189 @@ int config_parse_namespace_path_strv(
                 if (r == -ENOMEM)
                         return log_oom();
                 if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, r, "Trailing garbage, ignoring: %s", prev);
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to extract first word, ignoring: %s", rvalue);
                         return 0;
                 }
 
                 if (!utf8_is_valid(word)) {
                         log_syntax_invalid_utf8(unit, LOG_ERR, filename, line, word);
-                        prev = cur;
                         continue;
                 }
 
-                offset = word[0] == '-';
-                if (!path_is_absolute(word + offset)) {
-                        log_syntax(unit, LOG_ERR, filename, line, 0, "Not an absolute path, ignoring: %s", word);
-                        prev = cur;
+                w = word;
+                if (startswith(w, "-")) {
+                        ignore_enoent = true;
+                        w++;
+                }
+                if (startswith(w, "+")) {
+                        shall_prefix = true;
+                        w++;
+                }
+
+                r = unit_full_printf(u, w, &resolved);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve specifiers in %s: %m", word);
                         continue;
                 }
 
-                path_kill_slashes(word + offset);
+                if (!path_is_absolute(resolved)) {
+                        log_syntax(unit, LOG_ERR, filename, line, 0, "Not an absolute path, ignoring: %s", resolved);
+                        continue;
+                }
 
-                r = strv_push(sv, word);
+                path_kill_slashes(resolved);
+
+                joined = strjoin(ignore_enoent ? "-" : "",
+                                 shall_prefix ? "+" : "",
+                                 resolved);
+
+                r = strv_push(sv, joined);
                 if (r < 0)
                         return log_oom();
 
-                prev = cur;
-                word = NULL;
+                joined = NULL;
+        }
+
+        return 0;
+}
+
+int config_parse_bind_paths(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        ExecContext *c = data;
+        Unit *u = userdata;
+        const char *p;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                /* Empty assignment resets the list */
+                bind_mount_free_many(c->bind_mounts, c->n_bind_mounts);
+                c->bind_mounts = NULL;
+                c->n_bind_mounts = 0;
+                return 0;
+        }
+
+        p = rvalue;
+        for (;;) {
+                _cleanup_free_ char *source = NULL, *destination = NULL;
+                _cleanup_free_ char *sresolved = NULL, *dresolved = NULL;
+                char *s = NULL, *d = NULL;
+                bool rbind = true, ignore_enoent = false;
+
+                r = extract_first_word(&p, &source, ":" WHITESPACE, EXTRACT_QUOTES|EXTRACT_DONT_COALESCE_SEPARATORS);
+                if (r == 0)
+                        break;
+                if (r == -ENOMEM)
+                        return log_oom();
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse %s: %s", lvalue, rvalue);
+                        return 0;
+                }
+
+                r = unit_full_printf(u, source, &sresolved);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r,
+                                   "Failed to resolved specifiers in \"%s\", ignoring: %m", source);
+                        return 0;
+                }
+
+                s = sresolved;
+                if (s[0] == '-') {
+                        ignore_enoent = true;
+                        s++;
+                }
+
+                if (!utf8_is_valid(s)) {
+                        log_syntax_invalid_utf8(unit, LOG_ERR, filename, line, s);
+                        return 0;
+                }
+                if (!path_is_absolute(s)) {
+                        log_syntax(unit, LOG_ERR, filename, line, 0, "Not an absolute source path, ignoring: %s", s);
+                        return 0;
+                }
+
+                path_kill_slashes(s);
+
+                /* Optionally, the destination is specified. */
+                if (p && p[-1] == ':') {
+                        r = extract_first_word(&p, &destination, ":" WHITESPACE, EXTRACT_QUOTES|EXTRACT_DONT_COALESCE_SEPARATORS);
+                        if (r == -ENOMEM)
+                                return log_oom();
+                        if (r < 0) {
+                                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse %s: %s", lvalue, rvalue);
+                                return 0;
+                        }
+                        if (r == 0) {
+                                log_syntax(unit, LOG_ERR, filename, line, 0, "Missing argument after ':': %s", rvalue);
+                                return 0;
+                        }
+
+                        r = unit_full_printf(u, destination, &dresolved);
+                        if (r < 0) {
+                                log_syntax(unit, LOG_ERR, filename, line, r,
+                                           "Failed to resolved specifiers in \"%s\", ignoring: %m", destination);
+                                return 0;
+                        }
+
+                        if (!utf8_is_valid(dresolved)) {
+                                log_syntax_invalid_utf8(unit, LOG_ERR, filename, line, dresolved);
+                                return 0;
+                        }
+                        if (!path_is_absolute(dresolved)) {
+                                log_syntax(unit, LOG_ERR, filename, line, 0, "Not an absolute destination path, ignoring: %s", dresolved);
+                                return 0;
+                        }
+
+                        d = path_kill_slashes(dresolved);
+
+                        /* Optionally, there's also a short option string specified */
+                        if (p && p[-1] == ':') {
+                                _cleanup_free_ char *options = NULL;
+
+                                r = extract_first_word(&p, &options, NULL, EXTRACT_QUOTES);
+                                if (r == -ENOMEM)
+                                        return log_oom();
+                                if (r < 0) {
+                                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse %s: %s", lvalue, rvalue);
+                                        return 0;
+                                }
+
+                                if (isempty(options) || streq(options, "rbind"))
+                                        rbind = true;
+                                else if (streq(options, "norbind"))
+                                        rbind = false;
+                                else {
+                                        log_syntax(unit, LOG_ERR, filename, line, 0, "Invalid option string, ignoring setting: %s", options);
+                                        return 0;
+                                }
+                        }
+                } else
+                        d = s;
+
+                r = bind_mount_add(&c->bind_mounts, &c->n_bind_mounts,
+                                   &(BindMount) {
+                                           .source = s,
+                                           .destination = d,
+                                           .read_only = !!strstr(lvalue, "ReadOnly"),
+                                           .recursive = rbind,
+                                           .ignore_enoent = ignore_enoent,
+                                   });
+                if (r < 0)
+                        return log_oom();
         }
 
         return 0;
@@ -4366,6 +4535,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_sec,                   "SECONDS" },
                 { config_parse_nsec,                  "NANOSECONDS" },
                 { config_parse_namespace_path_strv,   "PATH [...]" },
+                { config_parse_bind_paths,            "PATH[:PATH[:OPTIONS]] [...]" },
                 { config_parse_unit_requires_mounts_for, "PATH [...]" },
                 { config_parse_exec_mount_flags,      "MOUNTFLAG [...]" },
                 { config_parse_unit_string_printf,    "STRING" },

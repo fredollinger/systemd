@@ -74,6 +74,14 @@ class NetworkdTestingUtilities:
     some required methods.
     """
 
+    def add_veth_pair(self, veth, peer, veth_options=(), peer_options=()):
+        """Add a veth interface pair, and queue them to be removed."""
+        subprocess.check_call(['ip', 'link', 'add', 'name', veth] +
+                              list(veth_options) +
+                              ['type', 'veth', 'peer', 'name', peer] +
+                              list(peer_options))
+        self.addCleanup(subprocess.call, ['ip', 'link', 'del', 'dev', peer])
+
     def write_network(self, unit_name, contents):
         """Write a network unit file, and queue it to be removed."""
         unit_path = os.path.join(NETWORK_UNITDIR, unit_name)
@@ -88,9 +96,19 @@ class NetworkdTestingUtilities:
         dropin_path = os.path.join(dropin_dir, "%s.conf" % dropin_name)
 
         os.makedirs(dropin_dir, exist_ok=True)
+        self.addCleanup(os.rmdir, dropin_dir)
         with open(dropin_path, 'w') as dropin:
             dropin.write(contents)
         self.addCleanup(os.remove, dropin_path)
+
+    def read_attr(self, link, attribute):
+        """Read a link attributed from the sysfs."""
+        # Note we we don't want to check if interface `link' is managed, we
+        # want to evaluate link variable and pass the value of the link to
+        # assert_link_states e.g. eth0=managed.
+        self.assert_link_states(**{link:'managed'})
+        with open(os.path.join('/sys/class/net', link, attribute)) as f:
+            return f.readline().strip()
 
     def assert_link_states(self, **kwargs):
         """Match networkctl link states to the given ones.
@@ -131,6 +149,74 @@ class NetworkdTestingUtilities:
         if interfaces:
             self.fail("Missing links in status output: %s" % interfaces)
 
+
+class BridgeTest(NetworkdTestingUtilities, unittest.TestCase):
+    """Provide common methods for testing networkd against servers."""
+
+    def setUp(self):
+        self.write_network('port1.netdev', '''\
+[NetDev]
+Name=port1
+Kind=dummy
+MACAddress=12:34:56:78:9a:bc''')
+        self.write_network('port2.netdev', '''\
+[NetDev]
+Name=port2
+Kind=dummy
+MACAddress=12:34:56:78:9a:bd''')
+        self.write_network('mybridge.netdev', '''\
+[NetDev]
+Name=mybridge
+Kind=bridge''')
+        self.write_network('port1.network', '''\
+[Match]
+Name=port1
+[Network]
+Bridge=mybridge''')
+        self.write_network('port2.network', '''\
+[Match]
+Name=port2
+[Network]
+Bridge=mybridge''')
+        self.write_network('mybridge.network', '''\
+[Match]
+Name=mybridge
+[Network]
+DNS=192.168.250.1
+Address=192.168.250.33/24
+Gateway=192.168.250.1''')
+        subprocess.check_call(['systemctl', 'start', 'systemd-networkd'])
+
+    def tearDown(self):
+        subprocess.check_call(['systemctl', 'stop', 'systemd-networkd'])
+        subprocess.check_call(['ip', 'link', 'del', 'mybridge'])
+        subprocess.check_call(['ip', 'link', 'del', 'port1'])
+        subprocess.check_call(['ip', 'link', 'del', 'port2'])
+
+    def test_bridge_init(self):
+        self.assert_link_states(
+            port1='managed',
+            port2='managed',
+            mybridge='managed')
+
+    def test_bridge_port_priority(self):
+        self.assertEqual(self.read_attr('port1', 'brport/priority'), '32')
+        self.write_network_dropin('port1.network', 'priority', '''\
+[Bridge]
+Priority=28
+''')
+        subprocess.check_call(['systemctl', 'restart', 'systemd-networkd'])
+        self.assertEqual(self.read_attr('port1', 'brport/priority'), '28')
+
+    def test_bridge_port_priority_set_zero(self):
+        """It should be possible to set the bridge port priority to 0"""
+        self.assertEqual(self.read_attr('port2', 'brport/priority'), '32')
+        self.write_network_dropin('port2.network', 'priority', '''\
+[Bridge]
+Priority=0
+''')
+        subprocess.check_call(['systemctl', 'restart', 'systemd-networkd'])
+        self.assertEqual(self.read_attr('port2', 'brport/priority'), '0')
 
 class ClientTestBase(NetworkdTestingUtilities):
     """Provide common methods for testing networkd against servers."""
@@ -193,7 +279,11 @@ class ClientTestBase(NetworkdTestingUtilities):
 
     def do_test(self, coldplug=True, ipv6=False, extra_opts='',
                 online_timeout=10, dhcp_mode='yes'):
-        subprocess.check_call(['systemctl', 'start', 'systemd-resolved'])
+        try:
+            subprocess.check_call(['systemctl', 'start', 'systemd-resolved'])
+        except subprocess.CalledProcessError:
+            self.show_journal('systemd-resolved.service')
+            raise
         self.write_network(self.config, '''\
 [Match]
 Name=%s
@@ -439,9 +529,7 @@ IPv6AcceptRA=False''' % self.iface)
 
         # create second device/dnsmasq for a .company/.lab VPN interface
         # static IPs for simplicity
-        subprocess.check_call(['ip', 'link', 'add', 'name', 'testvpnclient', 'type',
-                               'veth', 'peer', 'name', 'testvpnrouter'])
-        self.addCleanup(subprocess.call, ['ip', 'link', 'del', 'dev', 'testvpnrouter'])
+        self.add_veth_pair('testvpnclient', 'testvpnrouter')
         subprocess.check_call(['ip', 'a', 'flush', 'dev', 'testvpnrouter'])
         subprocess.check_call(['ip', 'a', 'add', '10.241.3.1/24', 'dev', 'testvpnrouter'])
         subprocess.check_call(['ip', 'link', 'set', 'testvpnrouter', 'up'])
@@ -491,12 +579,67 @@ Domains= ~company ~lab''')
         # VPN domains should only be sent to VPN DNS
         self.assertRegex(vpn_log, 'query.*math.lab')
         self.assertRegex(vpn_log, 'query.*cantina.company')
-        self.assertNotIn('lab', general_log)
-        self.assertNotIn('company', general_log)
+        self.assertNotIn('.lab', general_log)
+        self.assertNotIn('.company', general_log)
 
         # general domains should not be sent to the VPN DNS
         self.assertRegex(general_log, 'query.*megasearch.net')
         self.assertNotIn('megasearch.net', vpn_log)
+
+    def test_resolved_etc_hosts(self):
+        '''resolved queries to /etc/hosts'''
+
+        # FIXME: -t MX query fails with enabled DNSSEC (even when using
+        # the known negative trust anchor .internal instead of .example)
+        conf = '/run/systemd/resolved.conf.d/test-disable-dnssec.conf'
+        os.makedirs(os.path.dirname(conf), exist_ok=True)
+        with open(conf, 'w') as f:
+            f.write('[Resolve]\nDNSSEC=no')
+        self.addCleanup(os.remove, conf)
+
+        # create /etc/hosts bind mount which resolves my.example for IPv4
+        hosts = os.path.join(self.workdir, 'hosts')
+        with open(hosts, 'w') as f:
+            f.write('172.16.99.99  my.example\n')
+        subprocess.check_call(['mount', '--bind', hosts, '/etc/hosts'])
+        self.addCleanup(subprocess.call, ['umount', '/etc/hosts'])
+        subprocess.check_call(['systemctl', 'stop', 'systemd-resolved.service'])
+
+        # note: different IPv4 address here, so that it's easy to tell apart
+        # what resolved the query
+        self.create_iface(dnsmasq_opts=['--host-record=my.example,172.16.99.1,2600::99:99',
+                                        '--host-record=other.example,172.16.0.42,2600::42',
+                                        '--mx-host=example,mail.example'],
+                          ipv6=True)
+        self.do_test(coldplug=None, ipv6=True)
+
+        try:
+            # family specific queries
+            out = subprocess.check_output(['systemd-resolve', '-4', 'my.example'])
+            self.assertIn(b'my.example: 172.16.99.99', out)
+            # we don't expect an IPv6 answer; if /etc/hosts has any IP address,
+            # it's considered a sufficient source
+            self.assertNotEqual(subprocess.call(['systemd-resolve', '-6', 'my.example']), 0)
+            # "any family" query; IPv4 should come from /etc/hosts
+            out = subprocess.check_output(['systemd-resolve', 'my.example'])
+            self.assertIn(b'my.example: 172.16.99.99', out)
+            # IP → name lookup; again, takes the /etc/hosts one
+            out = subprocess.check_output(['systemd-resolve', '172.16.99.99'])
+            self.assertIn(b'172.16.99.99: my.example', out)
+
+            # non-address RRs should fall back to DNS
+            out = subprocess.check_output(['systemd-resolve', '--type=MX', 'example'])
+            self.assertIn(b'example IN MX 1 mail.example', out)
+
+            # other domains query DNS
+            out = subprocess.check_output(['systemd-resolve', 'other.example'])
+            self.assertIn(b'172.16.0.42', out)
+            out = subprocess.check_output(['systemd-resolve', '172.16.0.42'])
+            self.assertIn(b'172.16.0.42: other.example', out)
+        except (AssertionError, subprocess.CalledProcessError):
+            self.show_journal('systemd-resolved.service')
+            self.print_server_log()
+            raise
 
     def test_transient_hostname(self):
         '''networkd sets transient hostname from DHCP'''
@@ -768,6 +911,42 @@ DNS=127.0.0.1''')
             raise
 
 
+class MatchClientTest(unittest.TestCase, NetworkdTestingUtilities):
+    """Test [Match] sections in .network files.
+
+    Be aware that matching the test host's interfaces will wipe their
+    configuration, so as a precaution, all network files should have a
+    restrictive [Match] section to only ever interfere with the
+    temporary veth interfaces created here.
+    """
+
+    def tearDown(self):
+        """Stop networkd."""
+        subprocess.call(['systemctl', 'stop', 'systemd-networkd'])
+
+    def test_basic_matching(self):
+        """Verify the Name= line works throughout this class."""
+        self.add_veth_pair('test_if1', 'fake_if2')
+        self.write_network('test.network', "[Match]\nName=test_*\n[Network]")
+        subprocess.check_call(['systemctl', 'start', 'systemd-networkd'])
+        self.assert_link_states(test_if1='managed', fake_if2='unmanaged')
+
+    def test_inverted_matching(self):
+        """Verify that a '!'-prefixed value inverts the match."""
+        # Use a MAC address as the interfaces' common matching attribute
+        # to avoid depending on udev, to support testing in containers.
+        mac = '00:01:02:03:98:99'
+        self.add_veth_pair('test_veth', 'test_peer',
+                           ['addr', mac], ['addr', mac])
+        self.write_network('no-veth.network', """\
+[Match]
+MACAddress=%s
+Name=!nonexistent *peer*
+[Network]""" % mac)
+        subprocess.check_call(['systemctl', 'start', 'systemd-networkd'])
+        self.assert_link_states(test_veth='managed', test_peer='unmanaged')
+
+
 class UnmanagedClientTest(unittest.TestCase, NetworkdTestingUtilities):
     """Test if networkd manages the correct interfaces."""
 
@@ -798,11 +977,7 @@ class UnmanagedClientTest(unittest.TestCase, NetworkdTestingUtilities):
     def create_iface(self):
         """Create temporary veth pairs for interface matching."""
         for veth, peer in self.veths.items():
-            subprocess.check_call(['ip', 'link', 'add',
-                                   'name', veth, 'type', 'veth',
-                                   'peer', 'name', peer])
-            self.addCleanup(subprocess.call,
-                            ['ip', 'link', 'del', 'dev', peer])
+            self.add_veth_pair(veth, peer)
 
     def test_unmanaged_setting(self):
         """Verify link states with Unmanaged= settings, hot-plug."""

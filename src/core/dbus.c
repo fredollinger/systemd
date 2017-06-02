@@ -175,7 +175,7 @@ static int signal_activation_request(sd_bus_message *message, void *userdata, sd
                 goto failed;
 
         if (u->refuse_manual_start) {
-                r = sd_bus_error_setf(&error, BUS_ERROR_ONLY_BY_DEPENDENCY, "Operation refused, %s may be requested by dependency only.", u->id);
+                r = sd_bus_error_setf(&error, BUS_ERROR_ONLY_BY_DEPENDENCY, "Operation refused, %s may be requested by dependency only (it is configured to refuse manual start/stop).", u->id);
                 goto failed;
         }
 
@@ -298,7 +298,7 @@ static int bus_job_find(sd_bus *bus, const char *path, const char *interface, vo
 }
 
 static int find_unit(Manager *m, sd_bus *bus, const char *path, Unit **unit, sd_bus_error *error) {
-        Unit *u;
+        Unit *u = NULL;  /* just to appease gcc, initialization is not really necessary */
         int r;
 
         assert(m);
@@ -323,14 +323,14 @@ static int find_unit(Manager *m, sd_bus *bus, const char *path, Unit **unit, sd_
                         return r;
 
                 u = manager_get_unit_by_pid(m, pid);
+                if (!u)
+                        return 0;
         } else {
                 r = manager_load_unit_from_dbus_path(m, path, error, &u);
                 if (r < 0)
                         return 0;
+                assert(u);
         }
-
-        if (!u)
-                return 0;
 
         *unit = u;
         return 1;
@@ -477,7 +477,7 @@ static int bus_kill_context_find(sd_bus *bus, const char *path, const char *inte
 }
 
 static int bus_job_enumerate(sd_bus *bus, const char *path, void *userdata, char ***nodes, sd_bus_error *error) {
-        _cleanup_free_ char **l = NULL;
+        _cleanup_strv_free_ char **l = NULL;
         Manager *m = userdata;
         unsigned k = 0;
         Iterator i;
@@ -504,7 +504,7 @@ static int bus_job_enumerate(sd_bus *bus, const char *path, void *userdata, char
 }
 
 static int bus_unit_enumerate(sd_bus *bus, const char *path, void *userdata, char ***nodes, sd_bus_error *error) {
-        _cleanup_free_ char **l = NULL;
+        _cleanup_strv_free_ char **l = NULL;
         Manager *m = userdata;
         unsigned k = 0;
         Iterator i;
@@ -753,13 +753,13 @@ int manager_sync_bus_names(Manager *m, sd_bus *bus) {
                         /* If it is, determine its current owner */
                         r = sd_bus_get_name_creds(bus, name, SD_BUS_CREDS_UNIQUE_NAME, &creds);
                         if (r < 0) {
-                                log_error_errno(r, "Failed to get bus name owner %s: %m", name);
+                                log_full_errno(r == -ENXIO ? LOG_DEBUG : LOG_ERR, r, "Failed to get bus name owner %s: %m", name);
                                 continue;
                         }
 
                         r = sd_bus_creds_get_unique_name(creds, &unique);
                         if (r < 0) {
-                                log_error_errno(r, "Failed to get unique name for %s: %m", name);
+                                log_full_errno(r == -ENXIO ? LOG_DEBUG : LOG_ERR, r, "Failed to get unique name for %s: %m", name);
                                 continue;
                         }
 
@@ -1041,6 +1041,7 @@ int bus_init(Manager *m, bool try_bus_connect) {
 
 static void destroy_bus(Manager *m, sd_bus **bus) {
         Iterator i;
+        Unit *u;
         Job *j;
 
         assert(m);
@@ -1048,6 +1049,17 @@ static void destroy_bus(Manager *m, sd_bus **bus) {
 
         if (!*bus)
                 return;
+
+        /* Make sure all bus slots watching names are released. */
+        HASHMAP_FOREACH(u, m->watch_bus, i) {
+                if (!u->match_bus_slot)
+                        continue;
+
+                if (sd_bus_slot_get_bus(u->match_bus_slot) != *bus)
+                        continue;
+
+                u->match_bus_slot = sd_bus_slot_unref(u->match_bus_slot);
+        }
 
         /* Get rid of tracked clients on this bus */
         if (m->subscribed && sd_bus_track_get_bus(m->subscribed) == *bus)

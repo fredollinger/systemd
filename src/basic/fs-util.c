@@ -17,7 +17,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <dirent.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -446,6 +445,7 @@ int mkfifo_atomic(const char *path, mode_t mode) {
 
 int get_files_in_directory(const char *path, char ***list) {
         _cleanup_closedir_ DIR *d = NULL;
+        struct dirent *de;
         size_t bufsize = 0, n = 0;
         _cleanup_strv_free_ char **l = NULL;
 
@@ -459,16 +459,7 @@ int get_files_in_directory(const char *path, char ***list) {
         if (!d)
                 return -errno;
 
-        for (;;) {
-                struct dirent *de;
-
-                errno = 0;
-                de = readdir(d);
-                if (!de && errno > 0)
-                        return -errno;
-                if (!de)
-                        break;
-
+        FOREACH_DIRENT_ALL(de, d, return -errno) {
                 dirent_ensure_type(d, de);
 
                 if (!dirent_is_file(de))
@@ -732,6 +723,8 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                         return -errno;
 
                 if (S_ISLNK(st.st_mode)) {
+                        char *joined;
+
                         _cleanup_free_ char *destination = NULL;
 
                         /* This is a symlink, in this case read the destination. But let's make sure we don't follow
@@ -755,9 +748,6 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                                 if (fd < 0)
                                         return -errno;
 
-                                free_and_replace(buffer, destination);
-
-                                todo = buffer;
                                 free(done);
 
                                 /* Note that we do not revalidate the root, we take it as is. */
@@ -769,19 +759,17 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                                                 return -ENOMEM;
                                 }
 
-                        } else {
-                                char *joined;
-
-                                /* A relative destination. If so, this is what we'll prefix what's left to do with what
-                                 * we just read, and start the loop again, but remain in the current directory. */
-
-                                joined = strjoin("/", destination, todo);
-                                if (!joined)
-                                        return -ENOMEM;
-
-                                free(buffer);
-                                todo = buffer = joined;
                         }
+
+                        /* Prefix what's left to do with what we just read, and start the loop again,
+                         * but remain in the current directory. */
+
+                        joined = strjoin("/", destination, todo);
+                        if (!joined)
+                                return -ENOMEM;
+
+                        free(buffer);
+                        todo = buffer = joined;
 
                         continue;
                 }
@@ -808,8 +796,10 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                         return -ENOMEM;
         }
 
-        *ret = done;
-        done = NULL;
+        if (ret) {
+                *ret = done;
+                done = NULL;
+        }
 
         return exists;
 }

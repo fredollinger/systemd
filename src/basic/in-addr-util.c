@@ -66,6 +66,18 @@ int in_addr_is_link_local(int family, const union in_addr_union *u) {
         return -EAFNOSUPPORT;
 }
 
+int in_addr_is_multicast(int family, const union in_addr_union *u) {
+        assert(u);
+
+        if (family == AF_INET)
+                return IN_MULTICAST(be32toh(u->in.s_addr));
+
+        if (family == AF_INET6)
+                return IN6_IS_ADDR_MULTICAST(&u->in6);
+
+        return -EAFNOSUPPORT;
+}
+
 bool in4_addr_is_localhost(const struct in_addr *a) {
         assert(a);
 
@@ -451,4 +463,46 @@ int in_addr_mask(int family, union in_addr_union *addr, unsigned char prefixlen)
         }
 
         return -EAFNOSUPPORT;
+}
+
+int in_addr_prefix_from_string(const char *p, int family, union in_addr_union *ret_prefix, uint8_t *ret_prefixlen) {
+        union in_addr_union buffer;
+        const char *e, *l;
+        uint8_t k;
+        int r;
+
+        assert(p);
+
+        if (!IN_SET(family, AF_INET, AF_INET6))
+                return -EAFNOSUPPORT;
+
+        e = strchr(p, '/');
+        if (e)
+                l = strndupa(p, e - p);
+        else
+                l = p;
+
+        r = in_addr_from_string(family, l, &buffer);
+        if (r < 0)
+                return r;
+
+        k = FAMILY_ADDRESS_SIZE(family) * 8;
+
+        if (e) {
+                uint8_t n;
+
+                r = safe_atou8(e + 1, &n);
+                if (r < 0)
+                        return r;
+
+                if (n > k)
+                        return -ERANGE;
+
+                k = n;
+        }
+
+        *ret_prefix = buffer;
+        *ret_prefixlen = k;
+
+        return 0;
 }

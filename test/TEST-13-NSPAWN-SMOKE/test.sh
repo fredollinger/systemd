@@ -43,6 +43,9 @@ test_setup() {
 
         cp create-busybox-container $initdir/
 
+        ./create-busybox-container $initdir/nc-container
+        initdir="$initdir/nc-container" dracut_install nc
+
         # setup the testsuite service
         cat >$initdir/etc/systemd/system/testsuite.service <<EOF
 [Unit]
@@ -83,6 +86,21 @@ if unshare -U sh -c :; then
     is_user_ns_supported=yes
 fi
 
+function check_bind_tmp_path {
+    # https://github.com/systemd/systemd/issues/4789
+    local _root="/var/lib/machines/bind-tmp-path"
+    /create-busybox-container "$_root"
+    >/tmp/bind
+    systemd-nspawn --register=no -D "$_root" --bind=/tmp/bind /bin/sh -c 'test -e /tmp/bind'
+}
+
+function check_notification_socket {
+    # https://github.com/systemd/systemd/issues/4944
+    local _cmd='echo a | $(busybox which nc) -U -u -w 1 /run/systemd/nspawn/notify'
+    systemd-nspawn --register=no -D /nc-container /bin/sh -x -c "$_cmd"
+    systemd-nspawn --register=no -D /nc-container -U /bin/sh -x -c "$_cmd"
+}
+
 function run {
     if [[ "$1" = "yes" && "$is_v2_supported" = "no" ]]; then
         printf "Unified cgroup hierarchy is not supported. Skipping.\n" >&2
@@ -112,6 +130,10 @@ function run {
 
     return 0
 }
+
+check_bind_tmp_path
+
+check_notification_socket
 
 for api_vfs_writable in yes no network; do
     run no no $api_vfs_writable

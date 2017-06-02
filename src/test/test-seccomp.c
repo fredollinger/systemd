@@ -17,10 +17,14 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include <sched.h>
 #include <stdlib.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
+#include <sys/poll.h>
+#include <sys/shm.h>
+#include <sys/types.h>
 #include <unistd.h>
-#include <sched.h>
 
 #include "alloc-util.h"
 #include "fd-util.h"
@@ -30,8 +34,19 @@
 #include "process-util.h"
 #include "raw-clone.h"
 #include "seccomp-util.h"
+#include "set.h"
 #include "string-util.h"
 #include "util.h"
+#include "virt.h"
+
+#if SCMP_SYS(socket) < 0 || defined(__i386__) || defined(__s390x__) || defined(__s390__)
+/* On these archs, socket() is implemented via the socketcall() syscall multiplexer,
+ * and we can't restrict it hence via seccomp. */
+#  define SECCOMP_RESTRICT_ADDRESS_FAMILIES_BROKEN 1
+#else
+#  define SECCOMP_RESTRICT_ADDRESS_FAMILIES_BROKEN 0
+#endif
+
 
 static void test_seccomp_arch_to_string(void) {
         uint32_t a, b;
@@ -92,7 +107,6 @@ static void test_filter_sets(void) {
 
         if (!is_seccomp_available())
                 return;
-
         if (geteuid() != 0)
                 return;
 
@@ -108,16 +122,16 @@ static void test_filter_sets(void) {
                         int fd;
 
                         if (i == SYSCALL_FILTER_SET_DEFAULT) /* if we look at the default set, whitelist instead of blacklist */
-                                r = seccomp_load_filter_set(SCMP_ACT_ERRNO(EPERM), syscall_filter_sets + i, SCMP_ACT_ALLOW);
+                                r = seccomp_load_syscall_filter_set(SCMP_ACT_ERRNO(EUCLEAN), syscall_filter_sets + i, SCMP_ACT_ALLOW);
                         else
-                                r = seccomp_load_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + i, SCMP_ACT_ERRNO(EPERM));
+                                r = seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + i, SCMP_ACT_ERRNO(EUCLEAN));
                         if (r < 0)
                                 _exit(EXIT_FAILURE);
 
                         /* Test the sycall filter with one random system call */
                         fd = eventfd(0, EFD_NONBLOCK|EFD_CLOEXEC);
                         if (IN_SET(i, SYSCALL_FILTER_SET_IO_EVENT, SYSCALL_FILTER_SET_DEFAULT))
-                                assert_se(fd < 0 && errno == EPERM);
+                                assert_se(fd < 0 && errno == EUCLEAN);
                         else {
                                 assert_se(fd >= 0);
                                 safe_close(fd);
@@ -132,8 +146,8 @@ static void test_filter_sets(void) {
 
 static void test_restrict_namespace(void) {
         _cleanup_free_ char *s = NULL;
-        pid_t pid;
         unsigned long ul;
+        pid_t pid;
 
         assert_se(namespace_flag_to_string(0) == NULL);
         assert_se(streq(namespace_flag_to_string(CLONE_NEWNS), "mnt"));
@@ -157,7 +171,6 @@ static void test_restrict_namespace(void) {
 
         if (!is_seccomp_available())
                 return;
-
         if (geteuid() != 0)
                 return;
 
@@ -216,6 +229,330 @@ static void test_restrict_namespace(void) {
         assert_se(wait_for_terminate_and_warn("nsseccomp", pid, true) == EXIT_SUCCESS);
 }
 
+static void test_protect_sysctl(void) {
+        pid_t pid;
+
+        if (!is_seccomp_available())
+                return;
+        if (geteuid() != 0)
+                return;
+
+        if (detect_container() > 0) /* in containers _sysctl() is likely missing anyway */
+                return;
+
+        pid = fork();
+        assert_se(pid >= 0);
+
+        if (pid == 0) {
+                assert_se(syscall(__NR__sysctl, NULL) < 0);
+                assert_se(errno == EFAULT);
+
+                assert_se(seccomp_protect_sysctl() >= 0);
+
+                assert_se(syscall(__NR__sysctl, 0, 0, 0) < 0);
+                assert_se(errno == EPERM);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        assert_se(wait_for_terminate_and_warn("sysctlseccomp", pid, true) == EXIT_SUCCESS);
+}
+
+static void test_restrict_address_families(void) {
+        pid_t pid;
+
+        if (!is_seccomp_available())
+                return;
+        if (geteuid() != 0)
+                return;
+
+        pid = fork();
+        assert_se(pid >= 0);
+
+        if (pid == 0) {
+                int fd;
+                Set *s;
+
+                fd = socket(AF_INET, SOCK_DGRAM, 0);
+                assert_se(fd >= 0);
+                safe_close(fd);
+
+                fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+                assert_se(fd >= 0);
+                safe_close(fd);
+
+                fd = socket(AF_NETLINK, SOCK_DGRAM, 0);
+                assert_se(fd >= 0);
+                safe_close(fd);
+
+                assert_se(s = set_new(NULL));
+                assert_se(set_put(s, INT_TO_PTR(AF_UNIX)) >= 0);
+
+                assert_se(seccomp_restrict_address_families(s, false) >= 0);
+
+                fd = socket(AF_INET, SOCK_DGRAM, 0);
+                assert_se(fd >= 0);
+                safe_close(fd);
+
+                fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+#if SECCOMP_RESTRICT_ADDRESS_FAMILIES_BROKEN
+                assert_se(fd >= 0);
+                safe_close(fd);
+#else
+                assert_se(fd < 0);
+                assert_se(errno == EAFNOSUPPORT);
+#endif
+
+                fd = socket(AF_NETLINK, SOCK_DGRAM, 0);
+                assert_se(fd >= 0);
+                safe_close(fd);
+
+                set_clear(s);
+
+                assert_se(set_put(s, INT_TO_PTR(AF_INET)) >= 0);
+
+                assert_se(seccomp_restrict_address_families(s, true) >= 0);
+
+                fd = socket(AF_INET, SOCK_DGRAM, 0);
+                assert_se(fd >= 0);
+                safe_close(fd);
+
+                fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+#if SECCOMP_RESTRICT_ADDRESS_FAMILIES_BROKEN
+                assert_se(fd >= 0);
+                safe_close(fd);
+#else
+                assert_se(fd < 0);
+                assert_se(errno == EAFNOSUPPORT);
+#endif
+
+                fd = socket(AF_NETLINK, SOCK_DGRAM, 0);
+#if SECCOMP_RESTRICT_ADDRESS_FAMILIES_BROKEN
+                assert_se(fd >= 0);
+                safe_close(fd);
+#else
+                assert_se(fd < 0);
+                assert_se(errno == EAFNOSUPPORT);
+#endif
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        assert_se(wait_for_terminate_and_warn("socketseccomp", pid, true) == EXIT_SUCCESS);
+}
+
+static void test_restrict_realtime(void) {
+        pid_t pid;
+
+        if (!is_seccomp_available())
+                return;
+        if (geteuid() != 0)
+                return;
+
+        if (detect_container() > 0) /* in containers RT privs are likely missing anyway */
+                return;
+
+        pid = fork();
+        assert_se(pid >= 0);
+
+        if (pid == 0) {
+                assert_se(sched_setscheduler(0, SCHED_FIFO, &(struct sched_param) { .sched_priority = 1 }) >= 0);
+                assert_se(sched_setscheduler(0, SCHED_RR, &(struct sched_param) { .sched_priority = 1 }) >= 0);
+                assert_se(sched_setscheduler(0, SCHED_IDLE, &(struct sched_param) { .sched_priority = 0 }) >= 0);
+                assert_se(sched_setscheduler(0, SCHED_BATCH, &(struct sched_param) { .sched_priority = 0 }) >= 0);
+                assert_se(sched_setscheduler(0, SCHED_OTHER, &(struct sched_param) {}) >= 0);
+
+                assert_se(seccomp_restrict_realtime() >= 0);
+
+                assert_se(sched_setscheduler(0, SCHED_IDLE, &(struct sched_param) { .sched_priority = 0 }) >= 0);
+                assert_se(sched_setscheduler(0, SCHED_BATCH, &(struct sched_param) { .sched_priority = 0 }) >= 0);
+                assert_se(sched_setscheduler(0, SCHED_OTHER, &(struct sched_param) {}) >= 0);
+
+                assert_se(sched_setscheduler(0, SCHED_FIFO, &(struct sched_param) { .sched_priority = 1 }) < 0);
+                assert_se(errno == EPERM);
+                assert_se(sched_setscheduler(0, SCHED_RR, &(struct sched_param) { .sched_priority = 1 }) < 0);
+                assert_se(errno == EPERM);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        assert_se(wait_for_terminate_and_warn("realtimeseccomp", pid, true) == EXIT_SUCCESS);
+}
+
+static void test_memory_deny_write_execute_mmap(void) {
+        pid_t pid;
+
+        if (!is_seccomp_available())
+                return;
+        if (geteuid() != 0)
+                return;
+
+        pid = fork();
+        assert_se(pid >= 0);
+
+        if (pid == 0) {
+                void *p;
+
+                p = mmap(NULL, page_size(), PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1,0);
+                assert_se(p != MAP_FAILED);
+                assert_se(munmap(p, page_size()) >= 0);
+
+                p = mmap(NULL, page_size(), PROT_WRITE|PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1,0);
+                assert_se(p != MAP_FAILED);
+                assert_se(munmap(p, page_size()) >= 0);
+
+                assert_se(seccomp_memory_deny_write_execute() >= 0);
+
+                p = mmap(NULL, page_size(), PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1,0);
+#if defined(__x86_64__) || defined(__i386__) || defined(__powerpc64__) || defined(__arm__) || defined(__aarch64__)
+                assert_se(p == MAP_FAILED);
+                assert_se(errno == EPERM);
+#else /* unknown architectures */
+                assert_se(p != MAP_FAILED);
+                assert_se(munmap(p, page_size()) >= 0);
+#endif
+
+                p = mmap(NULL, page_size(), PROT_WRITE|PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1,0);
+                assert_se(p != MAP_FAILED);
+                assert_se(munmap(p, page_size()) >= 0);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        assert_se(wait_for_terminate_and_warn("memoryseccomp-mmap", pid, true) == EXIT_SUCCESS);
+}
+
+static void test_memory_deny_write_execute_shmat(void) {
+        int shmid;
+        pid_t pid;
+
+        if (!is_seccomp_available())
+                return;
+        if (geteuid() != 0)
+                return;
+
+        shmid = shmget(IPC_PRIVATE, page_size(), 0);
+        assert_se(shmid >= 0);
+
+        pid = fork();
+        assert_se(pid >= 0);
+
+        if (pid == 0) {
+                void *p;
+
+                p = shmat(shmid, NULL, 0);
+                assert_se(p != MAP_FAILED);
+                assert_se(shmdt(p) == 0);
+
+                p = shmat(shmid, NULL, SHM_EXEC);
+                assert_se(p != MAP_FAILED);
+                assert_se(shmdt(p) == 0);
+
+                assert_se(seccomp_memory_deny_write_execute() >= 0);
+
+                p = shmat(shmid, NULL, SHM_EXEC);
+#if defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)
+                assert_se(p == MAP_FAILED);
+                assert_se(errno == EPERM);
+#else /* __i386__, __powerpc64__, and "unknown" architectures */
+                assert_se(p != MAP_FAILED);
+                assert_se(shmdt(p) == 0);
+#endif
+
+                p = shmat(shmid, NULL, 0);
+                assert_se(p != MAP_FAILED);
+                assert_se(shmdt(p) == 0);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        assert_se(wait_for_terminate_and_warn("memoryseccomp-shmat", pid, true) == EXIT_SUCCESS);
+}
+
+static void test_restrict_archs(void) {
+        pid_t pid;
+
+        if (!is_seccomp_available())
+                return;
+        if (geteuid() != 0)
+                return;
+
+        pid = fork();
+        assert_se(pid >= 0);
+
+        if (pid == 0) {
+                _cleanup_set_free_ Set *s = NULL;
+
+                assert_se(access("/", F_OK) >= 0);
+
+                assert_se(s = set_new(NULL));
+
+#ifdef __x86_64__
+                assert_se(set_put(s, UINT32_TO_PTR(SCMP_ARCH_X86+1)) >= 0);
+#endif
+                assert_se(seccomp_restrict_archs(s) >= 0);
+
+                assert_se(access("/", F_OK) >= 0);
+                assert_se(seccomp_restrict_archs(NULL) >= 0);
+
+                assert_se(access("/", F_OK) >= 0);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        assert_se(wait_for_terminate_and_warn("archseccomp", pid, true) == EXIT_SUCCESS);
+}
+
+static void test_load_syscall_filter_set_raw(void) {
+        pid_t pid;
+
+        if (!is_seccomp_available())
+                return;
+        if (geteuid() != 0)
+                return;
+
+        pid = fork();
+        assert_se(pid >= 0);
+
+        if (pid == 0) {
+                _cleanup_set_free_ Set *s = NULL;
+
+                assert_se(access("/", F_OK) >= 0);
+                assert_se(poll(NULL, 0, 0) == 0);
+
+                assert_se(seccomp_load_syscall_filter_set_raw(SCMP_ACT_ALLOW, NULL, SCMP_ACT_KILL) >= 0);
+                assert_se(access("/", F_OK) >= 0);
+                assert_se(poll(NULL, 0, 0) == 0);
+
+                assert_se(s = set_new(NULL));
+                assert_se(set_put(s, UINT32_TO_PTR(__NR_access + 1)) >= 0);
+
+                assert_se(seccomp_load_syscall_filter_set_raw(SCMP_ACT_ALLOW, s, SCMP_ACT_ERRNO(EUCLEAN)) >= 0);
+
+                assert_se(access("/", F_OK) < 0);
+                assert_se(errno == EUCLEAN);
+
+                assert_se(poll(NULL, 0, 0) == 0);
+
+                s = set_free(s);
+
+                assert_se(s = set_new(NULL));
+                assert_se(set_put(s, UINT32_TO_PTR(__NR_poll + 1)) >= 0);
+
+                assert_se(seccomp_load_syscall_filter_set_raw(SCMP_ACT_ALLOW, s, SCMP_ACT_ERRNO(EUNATCH)) >= 0);
+
+                assert_se(access("/", F_OK) < 0);
+                assert_se(errno == EUCLEAN);
+
+                assert_se(poll(NULL, 0, 0) < 0);
+                assert_se(errno == EUNATCH);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        assert_se(wait_for_terminate_and_warn("syscallrawseccomp", pid, true) == EXIT_SUCCESS);
+}
+
 int main(int argc, char *argv[]) {
 
         log_set_max_level(LOG_DEBUG);
@@ -225,6 +562,13 @@ int main(int argc, char *argv[]) {
         test_syscall_filter_set_find();
         test_filter_sets();
         test_restrict_namespace();
+        test_protect_sysctl();
+        test_restrict_address_families();
+        test_restrict_realtime();
+        test_memory_deny_write_execute_mmap();
+        test_memory_deny_write_execute_shmat();
+        test_restrict_archs();
+        test_load_syscall_filter_set_raw();
 
         return 0;
 }

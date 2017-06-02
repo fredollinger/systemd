@@ -45,7 +45,8 @@
 
   <refnamediv>
     <refname>systemd-mount</refname>
-    <refpurpose>Establish a mount or auto-mount point transiently</refpurpose>
+    <refname>systemd-umount</refname>
+    <refpurpose>Establish and destroy transient mount or auto-mount points</refpurpose>
   </refnamediv>
 
   <refsynopsisdiv>
@@ -60,6 +61,11 @@
       <arg choice="opt" rep="repeat"><replaceable>OPTIONS</replaceable></arg>
       <arg choice="plain"><option>--list</option></arg>
     </cmdsynopsis>
+    <cmdsynopsis>
+      <command>systemd-umount</command>
+      <arg choice="opt" rep="repeat"><replaceable>OPTIONS</replaceable></arg>
+      <arg choice="plain" rep="repeat"><replaceable>WHERE</replaceable></arg>
+    </cmdsynopsis>
   </refsynopsisdiv>
 
   <refsect1>
@@ -70,7 +76,7 @@
     <replaceable>WHERE</replaceable>.</para>
 
     <para>In many ways, <command>systemd-mount</command> is similar to the lower-level
-    <citerefentry><refentrytitle>mount</refentrytitle><manvolnum>8</manvolnum></citerefentry> command, however instead
+    <citerefentry project='man-pages'><refentrytitle>mount</refentrytitle><manvolnum>8</manvolnum></citerefentry> command, however instead
     of executing the mount operation directly and immediately, <command>systemd-mount</command> schedules it through
     the service manager job queue, so that it may pull in further dependencies (such as parent mounts, or a file system
     checker to execute a priori), and may make use of the auto-mounting logic.</para>
@@ -91,6 +97,9 @@
 
     <para>Use the <option>--list</option> command to show a terse table of all local, known block devices with file
     systems that may be mounted with this command.</para>
+
+    <para><command>systemd-umount</command> can be used to unmount a mount or automount point. It is the same
+    as <command>systemd-mount</command> <option>--unmount</option>.</para>
   </refsect1>
 
   <refsect1>
@@ -239,6 +248,15 @@
         such as labels, etc.</para></listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term><option>-u</option></term>
+        <term><option>--umount</option></term>
+
+        <listitem><para>Stop the mount and automount units corresponding to the specified mount points
+        <replaceable>WHERE</replaceable>.</para>
+        </listitem>
+      </varlistentry>
+
       <xi:include href="user-system-options.xml" xpointer="user" />
       <xi:include href="user-system-options.xml" xpointer="system" />
       <xi:include href="user-system-options.xml" xpointer="host" />
@@ -283,7 +301,7 @@
     <title>See Also</title>
     <para>
       <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>mount</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+      <citerefentry project='man-pages'><refentrytitle>mount</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemctl</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.unit</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.mount</refentrytitle><manvolnum>5</manvolnum></citerefentry>,

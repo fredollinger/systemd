@@ -18,7 +18,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fnmatch.h>
@@ -44,6 +43,7 @@
 #include "conf-files.h"
 #include "copy.h"
 #include "def.h"
+#include "dirent-util.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -380,12 +380,12 @@ static int dir_cleanup(
         bool deleted = false;
         int r = 0;
 
-        while ((dent = readdir(d))) {
+        FOREACH_DIRENT_ALL(dent, d, break) {
                 struct stat s;
                 usec_t age;
                 _cleanup_free_ char *sub_path = NULL;
 
-                if (STR_IN_SET(dent->d_name, ".", ".."))
+                if (dot_or_dot_dot(dent->d_name))
                         continue;
 
                 if (fstatat(dirfd(d), dent->d_name, &s, AT_SYMLINK_NOFOLLOW) < 0) {
@@ -649,7 +649,7 @@ static int path_set_perms(Item *i, const char *path) {
                         else {
                                 log_debug("chmod \"%s\" to mode %o", path, m);
                                 if (chmod(fn, m) < 0)
-                                        return log_error_errno(errno, "chmod(%s) failed: %m", path);
+                                        return log_error_errno(errno, "chmod() of %s via %s failed: %m", path, fn);
                         }
                 }
 
@@ -662,7 +662,7 @@ static int path_set_perms(Item *i, const char *path) {
                         if (chown(fn,
                                   i->uid_set ? i->uid : UID_INVALID,
                                   i->gid_set ? i->gid : GID_INVALID) < 0)
-                                return log_error_errno(errno, "chown(%s) failed: %m", path);
+                                return log_error_errno(errno, "chown() of %s via %s failed: %m", path, fn);
                 }
         }
 
@@ -724,10 +724,9 @@ static int path_set_xattrs(Item *i, const char *path) {
 
                 n = strlen(*value);
                 log_debug("Setting extended attribute '%s=%s' on %s.", *name, *value, path);
-                if (lsetxattr(path, *name, *value, n, 0) < 0) {
-                        log_error("Setting extended attribute %s=%s on %s failed: %m", *name, *value, path);
-                        return -errno;
-                }
+                if (lsetxattr(path, *name, *value, n, 0) < 0)
+                        return log_error_errno(errno, "Setting extended attribute %s=%s on %s failed: %m",
+                                               *name, *value, path);
         }
         return 0;
 }
@@ -872,7 +871,7 @@ static int parse_attribute_from_arg(Item *item) {
                 { 's', FS_SECRM_FL },        /* Secure deletion */
                 { 'u', FS_UNRM_FL },         /* Undelete */
                 { 't', FS_NOTAIL_FL },       /* file tail should not be merged */
-                { 'T', FS_TOPDIR_FL },       /* Top of directory hierarchies*/
+                { 'T', FS_TOPDIR_FL },       /* Top of directory hierarchies */
                 { 'C', FS_NOCOW_FL },        /* Do not cow file */
         };
 
@@ -973,7 +972,7 @@ static int path_set_attribute(Item *item, const char *path) {
 
         r = chattr_fd(fd, f, item->attribute_mask);
         if (r < 0)
-                log_full_errno(r == -ENOTTY ? LOG_DEBUG : LOG_WARNING,
+                log_full_errno(r == -ENOTTY || r == -EOPNOTSUPP ? LOG_DEBUG : LOG_WARNING,
                                r,
                                "Cannot set file attribute for '%s', value=0x%08x, mask=0x%08x: %m",
                                path, item->attribute_value, item->attribute_mask);
@@ -1053,6 +1052,7 @@ typedef int (*action_t)(Item *, const char *);
 
 static int item_do_children(Item *i, const char *path, action_t action) {
         _cleanup_closedir_ DIR *d;
+        struct dirent *de;
         int r = 0;
 
         assert(i);
@@ -1065,21 +1065,11 @@ static int item_do_children(Item *i, const char *path, action_t action) {
         if (!d)
                 return errno == ENOENT || errno == ENOTDIR ? 0 : -errno;
 
-        for (;;) {
+        FOREACH_DIRENT_ALL(de, d, r = -errno) {
                 _cleanup_free_ char *p = NULL;
-                struct dirent *de;
                 int q;
 
-                errno = 0;
-                de = readdir(d);
-                if (!de) {
-                        if (errno > 0 && r == 0)
-                                r = -errno;
-
-                        break;
-                }
-
-                if (STR_IN_SET(de->d_name, ".", ".."))
+                if (dot_or_dot_dot(de->d_name))
                         continue;
 
                 p = strjoin(path, "/", de->d_name);
@@ -1102,19 +1092,14 @@ static int item_do_children(Item *i, const char *path, action_t action) {
 
 static int glob_item(Item *i, action_t action, bool recursive) {
         _cleanup_globfree_ glob_t g = {
-                .gl_closedir = (void (*)(void *)) closedir,
-                .gl_readdir = (struct dirent *(*)(void *)) readdir,
                 .gl_opendir = (void *(*)(const char *)) opendir_nomod,
-                .gl_lstat = lstat,
-                .gl_stat = stat,
         };
         int r = 0, k;
         char **fn;
 
-        errno = 0;
-        k = glob(i->path, GLOB_NOSORT|GLOB_BRACE|GLOB_ALTDIRFUNC, NULL, &g);
-        if (k != 0 && k != GLOB_NOMATCH)
-                return log_error_errno(errno ?: EIO, "glob(%s) failed: %m", i->path);
+        k = safe_glob(i->path, GLOB_NOSORT|GLOB_BRACE, &g);
+        if (k < 0 && k != -ENOENT)
+                return log_error_errno(k, "glob(%s) failed: %m", i->path);
 
         STRV_FOREACH(fn, g.gl_pathv) {
                 k = action(i, *fn);
@@ -1179,7 +1164,7 @@ static int create_item(Item *i) {
                         return log_error_errno(r, "Failed to substitute specifiers in copy source %s: %m", i->argument);
 
                 log_debug("Copying tree \"%s\" to \"%s\".", resolved, i->path);
-                r = copy_tree(resolved, i->path, false);
+                r = copy_tree(resolved, i->path, i->uid_set ? i->uid : UID_INVALID, i->gid_set ? i->gid : GID_INVALID, COPY_REFLINK);
 
                 if (r == -EROFS && stat(i->path, &st) == 0)
                         r = -EEXIST;

@@ -99,6 +99,16 @@ static char **image_settings_path(Image *image) {
         return ret;
 }
 
+static char *image_roothash_path(Image *image) {
+        const char *fn;
+
+        assert(image);
+
+        fn = strjoina(image->name, ".roothash");
+
+        return file_in_same_dir(image->path, fn);
+}
+
 static int image_new(
                 ImageType t,
                 const char *pretty,
@@ -397,6 +407,7 @@ void image_hashmap_free(Hashmap *map) {
 int image_remove(Image *i) {
         _cleanup_release_lock_file_ LockFile global_lock = LOCK_FILE_INIT, local_lock = LOCK_FILE_INIT;
         _cleanup_strv_free_ char **settings = NULL;
+        _cleanup_free_ char *roothash = NULL;
         char **j;
         int r;
 
@@ -407,6 +418,10 @@ int image_remove(Image *i) {
 
         settings = image_settings_path(i);
         if (!settings)
+                return -ENOMEM;
+
+        roothash = image_roothash_path(i);
+        if (!roothash)
                 return -ENOMEM;
 
         /* Make sure we don't interfere with a running nspawn */
@@ -445,14 +460,17 @@ int image_remove(Image *i) {
                         log_debug_errno(errno, "Failed to unlink %s, ignoring: %m", *j);
         }
 
+        if (unlink(roothash) < 0 && errno != ENOENT)
+                log_debug_errno(errno, "Failed to unlink %s, ignoring: %m", roothash);
+
         return 0;
 }
 
-static int rename_settings_file(const char *path, const char *new_name) {
+static int rename_auxiliary_file(const char *path, const char *new_name, const char *suffix) {
         _cleanup_free_ char *rs = NULL;
         const char *fn;
 
-        fn = strjoina(new_name, ".nspawn");
+        fn = strjoina(new_name, suffix);
 
         rs = file_in_same_dir(path, fn);
         if (!rs)
@@ -463,7 +481,7 @@ static int rename_settings_file(const char *path, const char *new_name) {
 
 int image_rename(Image *i, const char *new_name) {
         _cleanup_release_lock_file_ LockFile global_lock = LOCK_FILE_INIT, local_lock = LOCK_FILE_INIT, name_lock = LOCK_FILE_INIT;
-        _cleanup_free_ char *new_path = NULL, *nn = NULL;
+        _cleanup_free_ char *new_path = NULL, *nn = NULL, *roothash = NULL;
         _cleanup_strv_free_ char **settings = NULL;
         unsigned file_attr = 0;
         char **j;
@@ -479,6 +497,10 @@ int image_rename(Image *i, const char *new_name) {
 
         settings = image_settings_path(i);
         if (!settings)
+                return -ENOMEM;
+
+        roothash = image_roothash_path(i);
+        if (!roothash)
                 return -ENOMEM;
 
         /* Make sure we don't interfere with a running nspawn */
@@ -550,30 +572,35 @@ int image_rename(Image *i, const char *new_name) {
         nn = NULL;
 
         STRV_FOREACH(j, settings) {
-                r = rename_settings_file(*j, new_name);
+                r = rename_auxiliary_file(*j, new_name, ".nspawn");
                 if (r < 0 && r != -ENOENT)
                         log_debug_errno(r, "Failed to rename settings file %s, ignoring: %m", *j);
         }
 
+        r = rename_auxiliary_file(roothash, new_name, ".roothash");
+        if (r < 0 && r != -ENOENT)
+                log_debug_errno(r, "Failed to rename roothash file %s, ignoring: %m", roothash);
+
         return 0;
 }
 
-static int clone_settings_file(const char *path, const char *new_name) {
+static int clone_auxiliary_file(const char *path, const char *new_name, const char *suffix) {
         _cleanup_free_ char *rs = NULL;
         const char *fn;
 
-        fn = strjoina(new_name, ".nspawn");
+        fn = strjoina(new_name, suffix);
 
         rs = file_in_same_dir(path, fn);
         if (!rs)
                 return -ENOMEM;
 
-        return copy_file_atomic(path, rs, 0664, false, 0);
+        return copy_file_atomic(path, rs, 0664, 0, COPY_REFLINK);
 }
 
 int image_clone(Image *i, const char *new_name, bool read_only) {
         _cleanup_release_lock_file_ LockFile name_lock = LOCK_FILE_INIT;
         _cleanup_strv_free_ char **settings = NULL;
+        _cleanup_free_ char *roothash = NULL;
         const char *new_path;
         char **j;
         int r;
@@ -585,6 +612,10 @@ int image_clone(Image *i, const char *new_name, bool read_only) {
 
         settings = image_settings_path(i);
         if (!settings)
+                return -ENOMEM;
+
+        roothash = image_roothash_path(i);
+        if (!roothash)
                 return -ENOMEM;
 
         /* Make sure nobody takes the new name, between the time we
@@ -605,7 +636,7 @@ int image_clone(Image *i, const char *new_name, bool read_only) {
         case IMAGE_SUBVOLUME:
         case IMAGE_DIRECTORY:
                 /* If we can we'll always try to create a new btrfs subvolume here, even if the source is a plain
-                 * directory.*/
+                 * directory. */
 
                 new_path = strjoina("/var/lib/machines/", new_name);
 
@@ -625,7 +656,7 @@ int image_clone(Image *i, const char *new_name, bool read_only) {
         case IMAGE_RAW:
                 new_path = strjoina("/var/lib/machines/", new_name, ".raw");
 
-                r = copy_file_atomic(i->path, new_path, read_only ? 0444 : 0644, false, FS_NOCOW_FL);
+                r = copy_file_atomic(i->path, new_path, read_only ? 0444 : 0644, FS_NOCOW_FL, COPY_REFLINK);
                 break;
 
         default:
@@ -636,10 +667,14 @@ int image_clone(Image *i, const char *new_name, bool read_only) {
                 return r;
 
         STRV_FOREACH(j, settings) {
-                r = clone_settings_file(*j, new_name);
+                r = clone_auxiliary_file(*j, new_name, ".nspawn");
                 if (r < 0 && r != -ENOENT)
                         log_debug_errno(r, "Failed to clone settings %s, ignoring: %m", *j);
         }
+
+        r = clone_auxiliary_file(roothash, new_name, ".roothash");
+        if (r < 0 && r != -ENOENT)
+                log_debug_errno(r, "Failed to clone root hash file %s, ignoring: %m", roothash);
 
         return 0;
 }
@@ -677,7 +712,7 @@ int image_read_only(Image *i, bool b) {
                    use the "immutable" flag, to at least make the
                    top-level directory read-only. It's not as good as
                    a read-only subvolume, but at least something, and
-                   we can read the value back.*/
+                   we can read the value back. */
 
                 r = chattr_path(i->path, b ? FS_IMMUTABLE_FL : 0, FS_IMMUTABLE_FL);
                 if (r < 0)

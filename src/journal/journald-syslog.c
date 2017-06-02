@@ -410,7 +410,7 @@ int server_open_syslog_socket(Server *s) {
                 return log_error_errno(errno, "SO_PASSCRED failed: %m");
 
 #ifdef HAVE_SELINUX
-        if (mac_selinux_have()) {
+        if (mac_selinux_use()) {
                 r = setsockopt(s->syslog_fd, SOL_SOCKET, SO_PASSSEC, &one, sizeof(one));
                 if (r < 0)
                         log_warning_errno(errno, "SO_PASSSEC failed: %m");
@@ -444,7 +444,8 @@ void server_maybe_warn_forward_syslog_missed(Server *s) {
         if (s->last_warn_forward_syslog_missed + WARN_FORWARD_SYSLOG_MISSED_USEC > n)
                 return;
 
-        server_driver_message(s, SD_MESSAGE_FORWARD_SYSLOG_MISSED,
+        server_driver_message(s,
+                              "MESSAGE_ID=" SD_MESSAGE_FORWARD_SYSLOG_MISSED_STR,
                               LOG_MESSAGE("Forwarding to syslog missed %u messages.",
                                           s->n_forward_syslog_missed),
                               NULL);

@@ -44,7 +44,7 @@ static pid_t pager_pid = 0;
 noreturn static void pager_fallback(void) {
         int r;
 
-        r = copy_bytes(STDIN_FILENO, STDOUT_FILENO, (uint64_t) -1, false);
+        r = copy_bytes(STDIN_FILENO, STDOUT_FILENO, (uint64_t) -1, 0);
         if (r < 0) {
                 log_error_errno(r, "Internal pager failed: %m");
                 _exit(EXIT_FAILURE);
@@ -52,6 +52,11 @@ noreturn static void pager_fallback(void) {
 
         _exit(EXIT_SUCCESS);
 }
+
+static int stored_stdout = -1;
+static int stored_stderr = -1;
+static bool stdout_redirected = false;
+static bool stderr_redirected = false;
 
 int pager_open(bool no_pager, bool jump_to_end) {
         _cleanup_close_pair_ int fd[2] = { -1, -1 };
@@ -104,7 +109,8 @@ int pager_open(bool no_pager, bool jump_to_end) {
                         less_opts = "FRSXMK";
                 if (jump_to_end)
                         less_opts = strjoina(less_opts, " +G");
-                setenv("LESS", less_opts, 1);
+                if (setenv("LESS", less_opts, 1) < 0)
+                        _exit(EXIT_FAILURE);
 
                 /* Initialize a good charset for less. This is
                  * particularly important if we output UTF-8
@@ -112,8 +118,9 @@ int pager_open(bool no_pager, bool jump_to_end) {
                 less_charset = getenv("SYSTEMD_LESSCHARSET");
                 if (!less_charset && is_locale_utf8())
                         less_charset = "utf-8";
-                if (less_charset)
-                        setenv("LESSCHARSET", less_charset, 1);
+                if (less_charset &&
+                    setenv("LESSCHARSET", less_charset, 1) < 0)
+                        _exit(EXIT_FAILURE);
 
                 /* Make sure the pager goes away when the parent dies */
                 if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0)
@@ -145,10 +152,19 @@ int pager_open(bool no_pager, bool jump_to_end) {
         }
 
         /* Return in the parent */
-        if (dup2(fd[1], STDOUT_FILENO) < 0)
+        stored_stdout = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        if (dup2(fd[1], STDOUT_FILENO) < 0) {
+                stored_stdout = safe_close(stored_stdout);
                 return log_error_errno(errno, "Failed to duplicate pager pipe: %m");
-        if (dup2(fd[1], STDERR_FILENO) < 0)
+        }
+        stdout_redirected = true;
+
+        stored_stderr = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+        if (dup2(fd[1], STDERR_FILENO) < 0) {
+                stored_stderr = safe_close(stored_stderr);
                 return log_error_errno(errno, "Failed to duplicate pager pipe: %m");
+        }
+        stderr_redirected = true;
 
         return 1;
 }
@@ -159,8 +175,17 @@ void pager_close(void) {
                 return;
 
         /* Inform pager that we are done */
-        stdout = safe_fclose(stdout);
-        stderr = safe_fclose(stderr);
+        (void) fflush(stdout);
+        if (stdout_redirected)
+                if (stored_stdout < 0 || dup2(stored_stdout, STDOUT_FILENO) < 0)
+                        (void) close(STDOUT_FILENO);
+        stored_stdout = safe_close(stored_stdout);
+        (void) fflush(stderr);
+        if (stderr_redirected)
+                if (stored_stderr < 0 || dup2(stored_stderr, STDERR_FILENO) < 0)
+                        (void) close(STDERR_FILENO);
+        stored_stderr = safe_close(stored_stderr);
+        stdout_redirected = stderr_redirected = false;
 
         (void) kill(pager_pid, SIGCONT);
         (void) wait_for_terminate(pager_pid, NULL);

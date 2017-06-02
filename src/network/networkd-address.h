@@ -25,6 +25,7 @@
 #include "in-addr-util.h"
 
 typedef struct Address Address;
+typedef struct Prefix Prefix;
 
 #include "networkd-link.h"
 #include "networkd-network.h"
@@ -33,10 +34,20 @@ typedef struct Address Address;
 
 typedef struct Network Network;
 typedef struct Link Link;
+typedef struct NetworkConfigSection NetworkConfigSection;
+
+struct Prefix {
+        Network *network;
+        NetworkConfigSection *section;
+
+        sd_radv_prefix *radv_prefix;
+
+        LIST_FIELDS(Prefix, prefixes);
+};
 
 struct Address {
         Network *network;
-        unsigned section;
+        NetworkConfigSection *section;
 
         Link *link;
 
@@ -62,7 +73,7 @@ struct Address {
         LIST_FIELDS(Address, addresses);
 };
 
-int address_new_static(Network *network, unsigned section, Address **ret);
+int address_new_static(Network *network, const char *filename, unsigned section, Address **ret);
 int address_new(Address **ret);
 void address_free(Address *address);
 int address_add_foreign(Link *link, int family, const union in_addr_union *in_addr, unsigned char prefixlen, Address **ret);
@@ -78,8 +89,20 @@ bool address_is_ready(const Address *a);
 DEFINE_TRIVIAL_CLEANUP_FUNC(Address*, address_free);
 #define _cleanup_address_free_ _cleanup_(address_freep)
 
+int prefix_new(Prefix **ret);
+void prefix_free(Prefix *prefix);
+int prefix_new_static(Network *network, const char *filename, unsigned section,
+                      Prefix **ret);
+
+DEFINE_TRIVIAL_CLEANUP_FUNC(Prefix*, prefix_free);
+#define _cleanup_prefix_free_ _cleanup_(prefix_freep)
+
 int config_parse_address(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_broadcast(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_label(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_lifetime(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_address_flags(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_router_preference(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_prefix(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_prefix_flags(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_prefix_lifetime(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);

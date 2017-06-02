@@ -35,8 +35,14 @@ typedef enum {
         WRITE_STRING_FILE_VERIFY_ON_FAILURE = 8,
 } WriteStringFileFlags;
 
-int write_string_stream(FILE *f, const char *line, bool enforce_newline);
-int write_string_file(const char *fn, const char *line, WriteStringFileFlags flags);
+int write_string_stream_ts(FILE *f, const char *line, bool enforce_newline, struct timespec *ts);
+static inline int write_string_stream(FILE *f, const char *line, bool enforce_newline) {
+        return write_string_stream_ts(f, line, enforce_newline, NULL);
+}
+int write_string_file_ts(const char *fn, const char *line, WriteStringFileFlags flags, struct timespec *ts);
+static inline int write_string_file(const char *fn, const char *line, WriteStringFileFlags flags) {
+        return write_string_file_ts(fn, line, flags, NULL);
+}
 
 int read_one_line_file(const char *fn, char **line);
 int read_full_file(const char *fn, char **contents, size_t *size);
@@ -47,6 +53,8 @@ int verify_file(const char *fn, const char *blob, bool accept_extra_nl);
 int parse_env_file(const char *fname, const char *separator, ...) _sentinel_;
 int load_env_file(FILE *f, const char *fname, const char *separator, char ***l);
 int load_env_file_pairs(FILE *f, const char *fname, const char *separator, char ***l);
+
+int merge_env_file(char ***env, FILE *f, const char *fname);
 
 int write_env_file(const char *fname, char **l);
 
@@ -84,7 +92,10 @@ int fputs_with_space(FILE *f, const char *s, const char *separator, bool *space)
 
 int open_tmpfile_unlinkable(const char *directory, int flags);
 int open_tmpfile_linkable(const char *target, int flags, char **ret_path);
+int open_serialization_fd(const char *ident);
 
 int link_tmpfile(int fd, const char *path, const char *target);
 
 int read_nul_string(FILE *f, char **ret);
+
+int mkdtemp_malloc(const char *template, char **ret);

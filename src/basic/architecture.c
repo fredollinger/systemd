@@ -123,7 +123,8 @@ int uname_architecture(void) {
                 { "crisv32",    ARCHITECTURE_CRIS     },
 #elif defined(__nios2__)
                 { "nios2",      ARCHITECTURE_NIOS2    },
-#elif defined(__riscv__)
+#elif defined(__riscv__) || defined(__riscv)
+        /* __riscv__ is obsolete, remove in 2018 */
                 { "riscv32",    ARCHITECTURE_RISCV32  },
                 { "riscv64",    ARCHITECTURE_RISCV64  },
 #  if __SIZEOF_POINTER__ == 4
@@ -131,6 +132,9 @@ int uname_architecture(void) {
 #  elif __SIZEOF_POINTER__ == 8
                 { "riscv",      ARCHITECTURE_RISCV64  },
 #  endif
+#elif defined(__arc__)
+                { "arc",        ARCHITECTURE_ARC      },
+                { "arceb",      ARCHITECTURE_ARC_BE   },
 #else
 #error "Please register your architecture here!"
 #endif
@@ -184,6 +188,8 @@ static const char *const architecture_table[_ARCHITECTURE_MAX] = {
         [ARCHITECTURE_NIOS2] = "nios2",
         [ARCHITECTURE_RISCV32] = "riscv32",
         [ARCHITECTURE_RISCV64] = "riscv64",
+        [ARCHITECTURE_ARC] = "arc",
+        [ARCHITECTURE_ARC_BE] = "arc-be",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(architecture, int);

@@ -576,6 +576,7 @@ int job_run_and_invalidate(Job *j) {
         if (!job_is_runnable(j))
                 return -EAGAIN;
 
+        job_start_timer(j, true);
         job_set_state(j, JOB_RUNNING);
         job_add_to_dbus_queue(j);
 
@@ -627,6 +628,8 @@ int job_run_and_invalidate(Job *j) {
                         r = job_finish_and_invalidate(j, JOB_ASSERT, true, false);
                 else if (r == -EOPNOTSUPP)
                         r = job_finish_and_invalidate(j, JOB_UNSUPPORTED, true, false);
+                else if (r == -ENOLINK)
+                        r = job_finish_and_invalidate(j, JOB_DEPENDENCY, true, false);
                 else if (r == -EAGAIN)
                         job_set_state(j, JOB_WAITING);
                 else if (r < 0)
@@ -645,7 +648,7 @@ _pure_ static const char *job_get_status_message_format(Unit *u, JobType t, JobR
                 [JOB_DEPENDENCY]  = "Dependency failed for %s.",
                 [JOB_ASSERT]      = "Assertion failed for %s.",
                 [JOB_UNSUPPORTED] = "Starting of %s not supported.",
-                [JOB_COLLECTED]   = "Unecessary job for %s was removed.",
+                [JOB_COLLECTED]   = "Unnecessary job for %s was removed.",
         };
         static const char *const generic_finished_stop_job[_JOB_RESULT_MAX] = {
                 [JOB_DONE]        = "Stopped %s.",
@@ -697,7 +700,7 @@ _pure_ static const char *job_get_status_message_format(Unit *u, JobType t, JobR
 static void job_print_status_message(Unit *u, JobType t, JobResult result) {
         static const struct {
                 const char *color, *word;
-        } const statuses[_JOB_RESULT_MAX] = {
+        } statuses[_JOB_RESULT_MAX] = {
                 [JOB_DONE]        = { ANSI_GREEN,            "  OK  " },
                 [JOB_TIMEOUT]     = { ANSI_HIGHLIGHT_RED,    " TIME " },
                 [JOB_FAILED]      = { ANSI_HIGHLIGHT_RED,    "FAILED" },
@@ -744,9 +747,8 @@ static void job_print_status_message(Unit *u, JobType t, JobResult result) {
 }
 
 static void job_log_status_message(Unit *u, JobType t, JobResult result) {
-        const char *format;
+        const char *format, *mid;
         char buf[LINE_MAX];
-        sd_id128_t mid;
         static const int job_result_log_level[_JOB_RESULT_MAX] = {
                 [JOB_DONE]        = LOG_INFO,
                 [JOB_CANCELED]    = LOG_INFO,
@@ -782,32 +784,35 @@ static void job_log_status_message(Unit *u, JobType t, JobResult result) {
         switch (t) {
 
         case JOB_START:
-                mid = result == JOB_DONE ? SD_MESSAGE_UNIT_STARTED : SD_MESSAGE_UNIT_FAILED;
+                if (result == JOB_DONE)
+                        mid = "MESSAGE_ID=" SD_MESSAGE_UNIT_STARTED_STR;
+                else
+                        mid = "MESSAGE_ID=" SD_MESSAGE_UNIT_FAILED_STR;
                 break;
 
         case JOB_RELOAD:
-                mid = SD_MESSAGE_UNIT_RELOADED;
+                mid = "MESSAGE_ID=" SD_MESSAGE_UNIT_RELOADED_STR;
                 break;
 
         case JOB_STOP:
         case JOB_RESTART:
-                mid = SD_MESSAGE_UNIT_STOPPED;
+                mid = "MESSAGE_ID=" SD_MESSAGE_UNIT_STOPPED_STR;
                 break;
 
         default:
                 log_struct(job_result_log_level[result],
-                           LOG_UNIT_ID(u),
                            LOG_MESSAGE("%s", buf),
                            "RESULT=%s", job_result_to_string(result),
+                           LOG_UNIT_ID(u),
                            NULL);
                 return;
         }
 
         log_struct(job_result_log_level[result],
-                   LOG_MESSAGE_ID(mid),
-                   LOG_UNIT_ID(u),
                    LOG_MESSAGE("%s", buf),
                    "RESULT=%s", job_result_to_string(result),
+                   LOG_UNIT_ID(u),
+                   mid,
                    NULL);
 }
 
@@ -945,22 +950,45 @@ static int job_dispatch_timer(sd_event_source *s, uint64_t monotonic, void *user
         return 0;
 }
 
-int job_start_timer(Job *j) {
+int job_start_timer(Job *j, bool job_running) {
         int r;
+        usec_t run_begin, timeout_time, old_timeout_time;
 
-        if (j->timer_event_source)
-                return 0;
+        if (job_running) {
+                if (j->unit->job_running_timeout == USEC_INFINITY)
+                        return 0;
 
-        j->begin_usec = now(CLOCK_MONOTONIC);
+                run_begin = now(CLOCK_MONOTONIC);
+                timeout_time = usec_add(run_begin, j->unit->job_running_timeout);
 
-        if (j->unit->job_timeout == USEC_INFINITY)
-                return 0;
+                if (j->timer_event_source) {
+                        /* Update only if JobRunningTimeoutSec= results in earlier timeout */
+                        r = sd_event_source_get_time(j->timer_event_source, &old_timeout_time);
+                        if (r < 0)
+                                return r;
+
+                        if (old_timeout_time <= timeout_time)
+                                return 0;
+
+                        return sd_event_source_set_time(j->timer_event_source, timeout_time);
+                }
+        } else {
+                if (j->timer_event_source)
+                        return 0;
+
+                j->begin_usec = now(CLOCK_MONOTONIC);
+
+                if (j->unit->job_timeout == USEC_INFINITY)
+                        return 0;
+
+                timeout_time = usec_add(j->begin_usec, j->unit->job_timeout);
+        }
 
         r = sd_event_add_time(
                         j->manager->event,
                         &j->timer_event_source,
                         CLOCK_MONOTONIC,
-                        usec_add(j->begin_usec, j->unit->job_timeout), 0,
+                        timeout_time, 0,
                         job_dispatch_timer, j);
         if (r < 0)
                 return r;

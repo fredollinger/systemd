@@ -45,11 +45,11 @@
 #include "service.h"
 #include "signal-util.h"
 #include "special.h"
+#include "stdio-util.h"
 #include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
 #include "unit-name.h"
-#include "unit-printf.h"
 #include "unit.h"
 #include "utf8.h"
 #include "util.h"
@@ -850,11 +850,8 @@ static int service_load_pid_file(Service *s, bool may_warn) {
                 return r;
 
         r = unit_watch_pid(UNIT(s), pid);
-        if (r < 0) {
-                /* FIXME: we need to do something here */
-                log_unit_warning_errno(UNIT(s), r, "Failed to watch PID "PID_FMT" for service: %m", pid);
-                return r;
-        }
+        if (r < 0) /* FIXME: we need to do something here */
+                return log_unit_warning_errno(UNIT(s), r, "Failed to watch PID "PID_FMT" for service: %m", pid);
 
         return 0;
 }
@@ -1205,7 +1202,7 @@ static int service_spawn(
                 ExecFlags flags,
                 pid_t *_pid) {
 
-        _cleanup_strv_free_ char **argv = NULL, **final_env = NULL, **our_env = NULL, **fd_names = NULL;
+        _cleanup_strv_free_ char **final_env = NULL, **our_env = NULL, **fd_names = NULL;
         _cleanup_free_ int *fds = NULL;
         unsigned n_fds = 0, n_env = 0;
         const char *path;
@@ -1263,10 +1260,6 @@ static int service_spawn(
         if (r < 0)
                 return r;
 
-        r = unit_full_printf_strv(UNIT(s), c->argv, &argv);
-        if (r < 0)
-                return r;
-
         our_env = new0(char*, 9);
         if (!our_env)
                 return -ENOMEM;
@@ -1297,10 +1290,10 @@ static int service_spawn(
                                 return r;
                 }
 
-                if (r == 0 && IN_SET(sa.sa.sa_family, AF_INET, AF_INET6)) {
+                if (r == 0 && IN_SET(sa.sa.sa_family, AF_INET, AF_INET6, AF_VSOCK)) {
                         _cleanup_free_ char *addr = NULL;
                         char *t;
-                        int port;
+                        unsigned port;
 
                         r = sockaddr_pretty(&sa.sa, salen, true, false, &addr);
                         if (r < 0)
@@ -1311,9 +1304,9 @@ static int service_spawn(
                                 return -ENOMEM;
                         our_env[n_env++] = t;
 
-                        port = sockaddr_port(&sa.sa);
-                        if (port < 0)
-                                return port;
+                        r = sockaddr_port(&sa.sa, &port);
+                        if (r < 0)
+                                return r;
 
                         if (asprintf(&t, "REMOTE_PORT=%u", port) < 0)
                                 return -ENOMEM;
@@ -1349,7 +1342,8 @@ static int service_spawn(
         } else
                 path = UNIT(s)->cgroup_path;
 
-        exec_params.argv = argv;
+        exec_params.flags |= MANAGER_IS_SYSTEM(UNIT(s)->manager) ? EXEC_NEW_KEYRING : 0;
+        exec_params.argv = c->argv;
         exec_params.environment = final_env;
         exec_params.fds = fds;
         exec_params.fd_names = fd_names;
@@ -1378,8 +1372,7 @@ static int service_spawn(
                 return r;
 
         r = unit_watch_pid(UNIT(s), pid);
-        if (r < 0)
-                /* FIXME: we need to do something here */
+        if (r < 0) /* FIXME: we need to do something here */
                 return r;
 
         *_pid = pid;
@@ -1714,7 +1707,7 @@ static void service_enter_running(Service *s, ServiceResult f) {
                 }
 
         } else if (f != SERVICE_SUCCESS)
-                service_enter_signal(s, SERVICE_FINAL_SIGTERM, f);
+                service_enter_signal(s, SERVICE_STOP_SIGTERM, f);
         else if (s->remain_after_exit)
                 service_set_state(s, SERVICE_EXITED);
         else
@@ -1851,7 +1844,7 @@ static void service_enter_start(Service *s) {
 
 fail:
         log_unit_warning_errno(UNIT(s), r, "Failed to run 'start' task: %m");
-        service_enter_signal(s, SERVICE_FINAL_SIGTERM, SERVICE_FAILURE_RESOURCES);
+        service_enter_signal(s, SERVICE_STOP_SIGTERM, SERVICE_FAILURE_RESOURCES);
 }
 
 static void service_enter_start_pre(Service *s) {
@@ -1997,9 +1990,7 @@ static void service_run_next_control(Service *s) {
 fail:
         log_unit_warning_errno(UNIT(s), r, "Failed to run next control task: %m");
 
-        if (s->state == SERVICE_START_PRE)
-                service_enter_signal(s, SERVICE_FINAL_SIGTERM, SERVICE_FAILURE_RESOURCES);
-        else if (s->state == SERVICE_STOP)
+        if (IN_SET(s->state, SERVICE_START_PRE, SERVICE_STOP))
                 service_enter_signal(s, SERVICE_STOP_SIGTERM, SERVICE_FAILURE_RESOURCES);
         else if (s->state == SERVICE_STOP_POST)
                 service_enter_dead(s, SERVICE_FAILURE_RESOURCES, true);
@@ -2150,6 +2141,79 @@ _pure_ static bool service_can_reload(Unit *u) {
         return !!s->exec_command[SERVICE_EXEC_RELOAD];
 }
 
+static unsigned service_exec_command_index(Unit *u, ServiceExecCommand id, ExecCommand *current) {
+        Service *s = SERVICE(u);
+        unsigned idx = 0;
+        ExecCommand *first, *c;
+
+        assert(s);
+
+        first = s->exec_command[id];
+
+        /* Figure out where we are in the list by walking back to the beginning */
+        for (c = current; c != first; c = c->command_prev)
+                idx++;
+
+        return idx;
+}
+
+static int service_serialize_exec_command(Unit *u, FILE *f, ExecCommand *command) {
+        Service *s = SERVICE(u);
+        ServiceExecCommand id;
+        unsigned idx;
+        const char *type;
+        char **arg;
+        _cleanup_free_ char *args = NULL, *p = NULL;
+        size_t allocated = 0, length = 0;
+
+        assert(s);
+        assert(f);
+
+        if (!command)
+                return 0;
+
+        if (command == s->control_command) {
+                type = "control";
+                id = s->control_command_id;
+        } else {
+                type = "main";
+                id = SERVICE_EXEC_START;
+        }
+
+        idx = service_exec_command_index(u, id, command);
+
+        STRV_FOREACH(arg, command->argv) {
+                size_t n;
+                _cleanup_free_ char *e = NULL;
+
+                e = xescape(*arg, WHITESPACE);
+                if (!e)
+                        return -ENOMEM;
+
+                n = strlen(e);
+                if (!GREEDY_REALLOC(args, allocated, length + 1 + n + 1))
+                        return -ENOMEM;
+
+                if (length > 0)
+                        args[length++] = ' ';
+
+                memcpy(args + length, e, n);
+                length += n;
+        }
+
+        if (!GREEDY_REALLOC(args, allocated, length + 1))
+                return -ENOMEM;
+        args[length++] = 0;
+
+        p = xescape(command->path, WHITESPACE);
+        if (!p)
+                return -ENOMEM;
+
+        fprintf(f, "%s-command=%s %u %s %s\n", type, service_exec_command_to_string(id), idx, p, args);
+
+        return 0;
+}
+
 static int service_serialize(Unit *u, FILE *f, FDSet *fds) {
         Service *s = SERVICE(u);
         ServiceFDStore *fs;
@@ -2177,11 +2241,8 @@ static int service_serialize(Unit *u, FILE *f, FDSet *fds) {
         if (r < 0)
                 return r;
 
-        /* FIXME: There's a minor uncleanliness here: if there are
-         * multiple commands attached here, we will start from the
-         * first one again */
-        if (s->control_command_id >= 0)
-                unit_serialize_item(u, f, "control-command", service_exec_command_to_string(s->control_command_id));
+        service_serialize_exec_command(u, f, s->control_command);
+        service_serialize_exec_command(u, f, s->main_command);
 
         r = unit_serialize_item_fd(u, f, fds, "stdin-fd", s->stdin_fd);
         if (r < 0)
@@ -2233,6 +2294,106 @@ static int service_serialize(Unit *u, FILE *f, FDSet *fds) {
 
         if (s->watchdog_override_enable)
                unit_serialize_item_format(u, f, "watchdog-override-usec", USEC_FMT, s->watchdog_override_usec);
+
+        return 0;
+}
+
+static int service_deserialize_exec_command(Unit *u, const char *key, const char *value) {
+        Service *s = SERVICE(u);
+        int r;
+        unsigned idx = 0, i;
+        bool control, found = false;
+        ServiceExecCommand id = _SERVICE_EXEC_COMMAND_INVALID;
+        ExecCommand *command = NULL;
+        _cleanup_free_ char *path = NULL;
+        _cleanup_strv_free_ char **argv = NULL;
+
+        enum ExecCommandState {
+                STATE_EXEC_COMMAND_TYPE,
+                STATE_EXEC_COMMAND_INDEX,
+                STATE_EXEC_COMMAND_PATH,
+                STATE_EXEC_COMMAND_ARGS,
+                _STATE_EXEC_COMMAND_MAX,
+                _STATE_EXEC_COMMAND_INVALID = -1,
+        } state;
+
+        assert(s);
+        assert(key);
+        assert(value);
+
+        control = streq(key, "control-command");
+
+        state = STATE_EXEC_COMMAND_TYPE;
+
+        for (;;) {
+                _cleanup_free_ char *arg = NULL;
+
+                r = extract_first_word(&value, &arg, NULL, EXTRACT_CUNESCAPE);
+                if (r == 0)
+                        break;
+                else if (r < 0)
+                        return r;
+
+                switch (state) {
+                case STATE_EXEC_COMMAND_TYPE:
+                        id = service_exec_command_from_string(arg);
+                        if (id < 0)
+                                return -EINVAL;
+
+                        state = STATE_EXEC_COMMAND_INDEX;
+                        break;
+                case STATE_EXEC_COMMAND_INDEX:
+                        r = safe_atou(arg, &idx);
+                        if (r < 0)
+                                return -EINVAL;
+
+                        state = STATE_EXEC_COMMAND_PATH;
+                        break;
+                case STATE_EXEC_COMMAND_PATH:
+                        path = arg;
+                        arg = NULL;
+                        state = STATE_EXEC_COMMAND_ARGS;
+
+                        if (!path_is_absolute(path))
+                                return -EINVAL;
+                        break;
+                case STATE_EXEC_COMMAND_ARGS:
+                        r = strv_extend(&argv, arg);
+                        if (r < 0)
+                                return -ENOMEM;
+                        break;
+                default:
+                        assert_not_reached("Unknown error at deserialization of exec command");
+                        break;
+                }
+        }
+
+        if (state != STATE_EXEC_COMMAND_ARGS)
+                return -EINVAL;
+
+        /* Let's check whether exec command on given offset matches data that we just deserialized */
+        for (command = s->exec_command[id], i = 0; command; command = command->command_next, i++) {
+                if (i != idx)
+                        continue;
+
+                found = strv_equal(argv, command->argv) && streq(command->path, path);
+                break;
+        }
+
+        if (!found) {
+                /* Command at the index we serialized is different, let's look for command that exactly
+                 * matches but is on different index. If there is no such command we will not resume execution. */
+                for (command = s->exec_command[id]; command; command = command->command_next)
+                        if (strv_equal(command->argv, argv) && streq(command->path, path))
+                                break;
+        }
+
+        if (command && control)
+                s->control_command = command;
+        else if (command)
+                s->main_command = command;
+        else
+                log_unit_warning(u, "Current command vanished from the unit file, execution of the command list won't be resumed.");
 
         return 0;
 }
@@ -2319,16 +2480,6 @@ static int service_deserialize_item(Unit *u, const char *key, const char *value,
                         s->status_text = t;
                 }
 
-        } else if (streq(key, "control-command")) {
-                ServiceExecCommand id;
-
-                id = service_exec_command_from_string(value);
-                if (id < 0)
-                        log_unit_debug(u, "Failed to parse exec-command value: %s", value);
-                else {
-                        s->control_command_id = id;
-                        s->control_command = s->exec_command[id];
-                }
         } else if (streq(key, "accept-socket")) {
                 Unit *socket;
 
@@ -2447,6 +2598,10 @@ static int service_deserialize_item(Unit *u, const char *key, const char *value,
                         s->watchdog_override_enable = true;
                         s->watchdog_override_usec = watchdog_override_usec;
                 }
+        } else if (STR_IN_SET(key, "main-command", "control-command")) {
+                r = service_deserialize_exec_command(u, key, value);
+                if (r < 0)
+                        log_unit_debug_errno(u, r, "Failed to parse serialized command \"%s\": %m", value);
         } else
                 log_unit_debug(u, "Unknown serialization key: %s", key);
 
@@ -2600,7 +2755,7 @@ static void service_notify_cgroup_empty_event(Unit *u) {
         case SERVICE_START:
                 if (s->type == SERVICE_NOTIFY) {
                         /* No chance of getting a ready notification anymore */
-                        service_enter_signal(s, SERVICE_FINAL_SIGTERM, SERVICE_FAILURE_PROTOCOL);
+                        service_enter_stop_post(s, SERVICE_FAILURE_PROTOCOL);
                         break;
                 }
 
@@ -2613,7 +2768,7 @@ static void service_notify_cgroup_empty_event(Unit *u) {
 
                         service_unwatch_pid_file(s);
                         if (s->state == SERVICE_START)
-                                service_enter_signal(s, SERVICE_FINAL_SIGTERM, SERVICE_FAILURE_PROTOCOL);
+                                service_enter_stop_post(s, SERVICE_FAILURE_PROTOCOL);
                         else
                                 service_enter_stop(s, SERVICE_FAILURE_PROTOCOL);
                 }
@@ -2703,7 +2858,6 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
 
                 log_struct(f == SERVICE_SUCCESS ? LOG_DEBUG :
                            (code == CLD_EXITED ? LOG_NOTICE : LOG_WARNING),
-                           LOG_UNIT_ID(u),
                            LOG_UNIT_MESSAGE(u, "Main process exited, code=%s, status=%i/%s",
                                             sigchld_code_to_string(code), status,
                                             strna(code == CLD_EXITED
@@ -2711,6 +2865,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                                   : signal_to_string(status))),
                            "EXIT_CODE=%s", sigchld_code_to_string(code),
                            "EXIT_STATUS=%i", status,
+                           LOG_UNIT_ID(u),
                            NULL);
 
                 if (s->result == SERVICE_SUCCESS)
@@ -2747,17 +2902,17 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                         if (f == SERVICE_SUCCESS)
                                                 service_enter_start_post(s);
                                         else
-                                                service_enter_signal(s, SERVICE_FINAL_SIGTERM, f);
+                                                service_enter_signal(s, SERVICE_STOP_SIGTERM, f);
                                         break;
                                 } else if (s->type == SERVICE_NOTIFY) {
                                         /* Only enter running through a notification, so that the
                                          * SERVICE_START state signifies that no ready notification
                                          * has been received */
                                         if (f != SERVICE_SUCCESS)
-                                                service_enter_signal(s, SERVICE_FINAL_SIGTERM, f);
+                                                service_enter_signal(s, SERVICE_STOP_SIGTERM, f);
                                         else if (!s->remain_after_exit)
                                                 /* The service has never been active */
-                                                service_enter_signal(s, SERVICE_FINAL_SIGTERM, SERVICE_FAILURE_PROTOCOL);
+                                                service_enter_signal(s, SERVICE_STOP_SIGTERM, SERVICE_FAILURE_PROTOCOL);
                                         break;
                                 }
 
@@ -2837,7 +2992,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                 if (f == SERVICE_SUCCESS)
                                         service_enter_start(s);
                                 else
-                                        service_enter_signal(s, SERVICE_FINAL_SIGTERM, f);
+                                        service_enter_signal(s, SERVICE_STOP_SIGTERM, f);
                                 break;
 
                         case SERVICE_START:
@@ -2846,7 +3001,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                         break;
 
                                 if (f != SERVICE_SUCCESS) {
-                                        service_enter_signal(s, SERVICE_FINAL_SIGTERM, f);
+                                        service_enter_signal(s, SERVICE_STOP_SIGTERM, f);
                                         break;
                                 }
 
@@ -2863,7 +3018,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                         if (!has_start_post && r < 0) {
                                                 r = service_demand_pid_file(s);
                                                 if (r < 0 || !cgroup_good(s))
-                                                        service_enter_signal(s, SERVICE_FINAL_SIGTERM, SERVICE_FAILURE_PROTOCOL);
+                                                        service_enter_signal(s, SERVICE_STOP_SIGTERM, SERVICE_FAILURE_PROTOCOL);
                                                 break;
                                         }
                                 } else
@@ -2944,7 +3099,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
 
         /* If the PID set is empty now, then let's finish this off
            (On unified we use proper notifications) */
-        if (cg_unified(SYSTEMD_CGROUP_CONTROLLER) <= 0 && set_isempty(u->pids))
+        if (cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER) == 0 && set_isempty(u->pids))
                 service_notify_cgroup_empty_event(u);
 }
 
@@ -2959,7 +3114,7 @@ static int service_dispatch_timer(sd_event_source *source, usec_t usec, void *us
         case SERVICE_START_PRE:
         case SERVICE_START:
                 log_unit_warning(UNIT(s), "%s operation timed out. Terminating.", s->state == SERVICE_START ? "Start" : "Start-pre");
-                service_enter_signal(s, SERVICE_FINAL_SIGTERM, SERVICE_FAILURE_TIMEOUT);
+                service_enter_signal(s, SERVICE_STOP_SIGTERM, SERVICE_FAILURE_TIMEOUT);
                 break;
 
         case SERVICE_START_POST:
@@ -3103,6 +3258,8 @@ static void service_notify_message(Unit *u, pid_t pid, char **tags, FDSet *fds) 
                         log_unit_warning(u, "Failed to parse MAINPID= field in notification message: %s", e);
                 else if (pid == s->control_pid)
                         log_unit_warning(u, "A control process cannot also be the main process");
+                else if (pid == getpid() || pid == 1)
+                        log_unit_warning(u, "Service manager can't be main process, ignoring sd_notify() MAINPID= field");
                 else {
                         service_set_main_pid(s, pid);
                         unit_watch_pid(UNIT(s), pid);
@@ -3292,7 +3449,7 @@ static void service_bus_name_owner_change(
                 if (r >= 0)
                         r = sd_bus_creds_get_pid(creds, &pid);
                 if (r >= 0) {
-                        log_unit_debug(u, "D-Bus name %s is now owned by process %u", name, (unsigned) pid);
+                        log_unit_debug(u, "D-Bus name %s is now owned by process " PID_FMT, name, pid);
 
                         service_set_main_pid(s, pid);
                         unit_watch_pid(UNIT(s), pid);

@@ -20,12 +20,13 @@
 ***/
 
 typedef struct Route Route;
+typedef struct NetworkConfigSection NetworkConfigSection;
 
 #include "networkd-network.h"
 
 struct Route {
         Network *network;
-        unsigned section;
+        NetworkConfigSection *section;
 
         Link *link;
 
@@ -52,7 +53,7 @@ struct Route {
         LIST_FIELDS(Route, routes);
 };
 
-int route_new_static(Network *network, unsigned section, Route **ret);
+int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret);
 int route_new(Route **ret);
 void route_free(Route *route);
 int route_configure(Route *route, Link *link, sd_netlink_message_handler_t callback);
@@ -74,3 +75,6 @@ int config_parse_destination(const char *unit, const char *filename, unsigned li
 int config_parse_route_priority(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_route_scope(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_route_table(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_gateway_onlink(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_ipv6_route_preference(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_route_protocol(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);

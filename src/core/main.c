@@ -49,6 +49,7 @@
 #include "cpu-set-util.h"
 #include "dbus-manager.h"
 #include "def.h"
+#include "emergency-action.h"
 #include "env-util.h"
 #include "fd-util.h"
 #include "fdset.h"
@@ -90,7 +91,6 @@
 #include "user-util.h"
 #include "virt.h"
 #include "watchdog.h"
-#include "emergency-action.h"
 
 static enum {
         ACTION_RUN,
@@ -337,60 +337,73 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
         assert(key);
 
-        if (streq(key, "systemd.unit") && value) {
+        if (STR_IN_SET(key, "systemd.unit", "rd.systemd.unit")) {
 
-                if (!in_initrd())
-                        return free_and_strdup(&arg_default_unit, value);
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
 
-        } else if (streq(key, "rd.systemd.unit") && value) {
+                if (!unit_name_is_valid(value, UNIT_NAME_PLAIN|UNIT_NAME_INSTANCE))
+                        log_warning("Unit name specified on %s= is not valid, ignoring: %s", key, value);
+                else if (in_initrd() == !!startswith(key, "rd.")) {
+                        if (free_and_strdup(&arg_default_unit, value) < 0)
+                                return log_oom();
+                }
 
-                if (in_initrd())
-                        return free_and_strdup(&arg_default_unit, value);
+        } else if (proc_cmdline_key_streq(key, "systemd.dump_core")) {
 
-        } else if (streq(key, "systemd.dump_core") && value) {
-
-                r = parse_boolean(value);
+                r = value ? parse_boolean(value) : true;
                 if (r < 0)
                         log_warning("Failed to parse dump core switch %s. Ignoring.", value);
                 else
                         arg_dump_core = r;
 
-        } else if (streq(key, "systemd.crash_chvt") && value) {
+        } else if (proc_cmdline_key_streq(key, "systemd.crash_chvt")) {
 
-                if (parse_crash_chvt(value) < 0)
+                if (!value)
+                        arg_crash_chvt = 0; /* turn on */
+                else if (parse_crash_chvt(value) < 0)
                         log_warning("Failed to parse crash chvt switch %s. Ignoring.", value);
 
-        } else if (streq(key, "systemd.crash_shell") && value) {
+        } else if (proc_cmdline_key_streq(key, "systemd.crash_shell")) {
 
-                r = parse_boolean(value);
+                r = value ? parse_boolean(value) : true;
                 if (r < 0)
                         log_warning("Failed to parse crash shell switch %s. Ignoring.", value);
                 else
                         arg_crash_shell = r;
 
-        } else if (streq(key, "systemd.crash_reboot") && value) {
+        } else if (proc_cmdline_key_streq(key, "systemd.crash_reboot")) {
 
-                r = parse_boolean(value);
+                r = value ? parse_boolean(value) : true;
                 if (r < 0)
                         log_warning("Failed to parse crash reboot switch %s. Ignoring.", value);
                 else
                         arg_crash_reboot = r;
 
-        } else if (streq(key, "systemd.confirm_spawn") && value) {
+        } else if (proc_cmdline_key_streq(key, "systemd.confirm_spawn")) {
+                char *s;
 
-                arg_confirm_spawn = mfree(arg_confirm_spawn);
-
-                r = parse_confirm_spawn(value, &arg_confirm_spawn);
+                r = parse_confirm_spawn(value, &s);
                 if (r < 0)
                         log_warning_errno(r, "Failed to parse confirm_spawn switch %s. Ignoring.", value);
+                else {
+                        free(arg_confirm_spawn);
+                        arg_confirm_spawn = s;
+                }
 
-        } else if (streq(key, "systemd.show_status") && value) {
+        } else if (proc_cmdline_key_streq(key, "systemd.show_status")) {
 
-                r = parse_show_status(value, &arg_show_status);
-                if (r < 0)
-                        log_warning("Failed to parse show status switch %s. Ignoring.", value);
+                if (value) {
+                        r = parse_show_status(value, &arg_show_status);
+                        if (r < 0)
+                                log_warning("Failed to parse show status switch %s. Ignoring.", value);
+                } else
+                        arg_show_status = SHOW_STATUS_YES;
 
-        } else if (streq(key, "systemd.default_standard_output") && value) {
+        } else if (proc_cmdline_key_streq(key, "systemd.default_standard_output")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
 
                 r = exec_output_from_string(value);
                 if (r < 0)
@@ -398,7 +411,10 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 else
                         arg_default_std_output = r;
 
-        } else if (streq(key, "systemd.default_standard_error") && value) {
+        } else if (proc_cmdline_key_streq(key, "systemd.default_standard_error")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
 
                 r = exec_output_from_string(value);
                 if (r < 0)
@@ -406,24 +422,42 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 else
                         arg_default_std_error = r;
 
-        } else if (streq(key, "systemd.setenv") && value) {
+        } else if (streq(key, "systemd.setenv")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
 
                 if (env_assignment_is_valid(value)) {
                         char **env;
 
                         env = strv_env_set(arg_default_environment, value);
-                        if (env)
-                                arg_default_environment = env;
-                        else
-                                log_warning_errno(ENOMEM, "Setting environment variable '%s' failed, ignoring: %m", value);
+                        if (!env)
+                                return log_oom();
+
+                        arg_default_environment = env;
                 } else
                         log_warning("Environment variable name '%s' is not valid. Ignoring.", value);
 
-        } else if (streq(key, "systemd.machine_id") && value) {
+        } else if (proc_cmdline_key_streq(key, "systemd.machine_id")) {
 
-               r = set_machine_id(value);
-               if (r < 0)
-                       log_warning("MachineID '%s' is not valid. Ignoring.", value);
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                r = set_machine_id(value);
+                if (r < 0)
+                        log_warning("MachineID '%s' is not valid. Ignoring.", value);
+
+        } else if (proc_cmdline_key_streq(key, "systemd.default_timeout_start_sec")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                r = parse_sec(value, &arg_default_timeout_start_usec);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to parse default start timeout: %s, ignoring.", value);
+
+                if (arg_default_timeout_start_usec <= 0)
+                        arg_default_timeout_start_usec = USEC_INFINITY;
 
         } else if (streq(key, "quiet") && !value) {
 
@@ -445,15 +479,6 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 target = runlevel_to_target(key);
                 if (target)
                         return free_and_strdup(&arg_default_unit, target);
-
-        } else if (streq(key, "systemd.default_timeout_start_sec") && value) {
-
-                r = parse_sec(value, &arg_default_timeout_start_usec);
-                if (r < 0)
-                        log_warning_errno(r, "Failed to parse default start timeout: %s, ignoring.", value);
-
-                if (arg_default_timeout_start_usec <= 0)
-                        arg_default_timeout_start_usec = USEC_INFINITY;
         }
 
         return 0;
@@ -511,7 +536,7 @@ static int config_parse_cpu_affinity2(
                 return ncpus;
 
         if (sched_setaffinity(0, CPU_ALLOC_SIZE(ncpus), c) < 0)
-                log_warning("Failed to set CPU affinity: %m");
+                log_warning_errno(errno, "Failed to set CPU affinity: %m");
 
         return 0;
 }
@@ -904,7 +929,6 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_UNIT:
-
                         r = free_and_strdup(&arg_default_unit, optarg);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to set default unit %s: %m", optarg);
@@ -1138,6 +1162,8 @@ static int prepare_reexecute(Manager *m, FILE **_f, FDSet **_fds, bool switching
 static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
         struct rlimit nl;
         int r;
+        int min_max;
+        _cleanup_free_ char *nr_open = NULL;
 
         assert(saved_rlimit);
 
@@ -1158,8 +1184,16 @@ static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
                 arg_default_rlimit[RLIMIT_NOFILE] = rl;
         }
 
+        /* Get current RLIMIT_NOFILE maximum compiled into the kernel. */
+        r = read_one_line_file("/proc/sys/fs/nr_open", &nr_open);
+        if (r == 0)
+                r = safe_atoi(nr_open, &min_max);
+        /* If we fail, fallback to the hard-coded kernel limit of 1024 * 1024. */
+        if (r < 0)
+                min_max = 1024 * 1024;
+
         /* Bump up the resource limit for ourselves substantially */
-        nl.rlim_cur = nl.rlim_max = 64*1024;
+        nl.rlim_cur = nl.rlim_max = min_max;
         r = setrlimit_closest(RLIMIT_NOFILE, &nl);
         if (r < 0)
                 return log_warning_errno(r, "Setting RLIMIT_NOFILE failed, ignoring: %m");
@@ -1207,44 +1241,16 @@ oom:
 
 static int enforce_syscall_archs(Set *archs) {
 #ifdef HAVE_SECCOMP
-        scmp_filter_ctx *seccomp;
-        Iterator i;
-        void *id;
         int r;
 
         if (!is_seccomp_available())
                 return 0;
 
-        seccomp = seccomp_init(SCMP_ACT_ALLOW);
-        if (!seccomp)
-                return log_oom();
-
-        SET_FOREACH(id, arg_syscall_archs, i) {
-                r = seccomp_arch_add(seccomp, PTR_TO_UINT32(id) - 1);
-                if (r == -EEXIST)
-                        continue;
-                if (r < 0) {
-                        log_error_errno(r, "Failed to add architecture to seccomp: %m");
-                        goto finish;
-                }
-        }
-
-        r = seccomp_attr_set(seccomp, SCMP_FLTATR_CTL_NNP, 0);
-        if (r < 0) {
-                log_error_errno(r, "Failed to unset NO_NEW_PRIVS: %m");
-                goto finish;
-        }
-
-        r = seccomp_load(seccomp);
+        r = seccomp_restrict_archs(arg_syscall_archs);
         if (r < 0)
-                log_error_errno(r, "Failed to add install architecture seccomp: %m");
-
-finish:
-        seccomp_release(seccomp);
-        return r;
-#else
-        return 0;
+                return log_error_errno(r, "Failed to enforce system call architecture restrication: %m");
 #endif
+        return 0;
 }
 
 static int status_welcome(void) {
@@ -1342,10 +1348,9 @@ static int fixup_environment(void) {
          * However if TERM was configured through the kernel
          * command line then leave it alone. */
 
-        r = get_proc_cmdline_key("TERM=", &term);
+        r = proc_cmdline_get_key("TERM", 0, &term);
         if (r < 0)
                 return r;
-
         if (r == 0) {
                 term = strdup(default_term_for_tty("/dev/console"));
                 if (!term)
@@ -1412,16 +1417,23 @@ int main(int argc, char *argv[]) {
            called 'systemd'. That is confusing, hence let's call us
            systemd right-away. */
         program_invocation_short_name = systemd;
-        prctl(PR_SET_NAME, systemd);
+        (void) prctl(PR_SET_NAME, systemd);
 
         saved_argv = argv;
         saved_argc = argc;
 
         log_set_upgrade_syslog_to_journal(true);
 
-        /* Disable the umask logic */
-        if (getpid() == 1)
+        if (getpid() == 1) {
+                /* Disable the umask logic */
                 umask(0);
+
+                /* Always reopen /dev/console when running as PID 1 or one of its pre-execve() children. This is
+                 * important so that we never end up logging to any foreign stderr, for example if we have to log in a
+                 * child process right before execve()'ing the actual binary, at a point in time where socket
+                 * activation stderr/stdout area already set up. */
+                log_set_always_reopen_console(true);
+        }
 
         if (getpid() == 1 && detect_container() <= 0) {
 
@@ -1436,9 +1448,10 @@ int main(int argc, char *argv[]) {
                 if (!skip_setup) {
                         r = mount_setup_early();
                         if (r < 0) {
-                                error_message = "Failed to early mount API filesystems";
+                                error_message = "Failed to mount early API filesystems";
                                 goto finish;
                         }
+
                         dual_timestamp_get(&security_start_timestamp);
                         if (mac_selinux_setup(&loaded_policy) < 0) {
                                 error_message = "Failed to load SELinux policy";
@@ -1514,7 +1527,7 @@ int main(int argc, char *argv[]) {
                 log_close_console(); /* force reopen of /dev/console */
                 log_open();
 
-                /* For the later on, see above... */
+                /* For later on, see above... */
                 log_set_target(LOG_TARGET_JOURNAL);
 
                 /* clear the kernel timestamp,
@@ -1591,7 +1604,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (arg_system) {
-                r = parse_proc_cmdline(parse_proc_cmdline_item, NULL, false);
+                r = proc_cmdline_parse(parse_proc_cmdline_item, NULL, 0);
                 if (r < 0)
                         log_warning_errno(r, "Failed to parse kernel command line, ignoring: %m");
         }
@@ -1834,8 +1847,10 @@ int main(int argc, char *argv[]) {
         before_startup = now(CLOCK_MONOTONIC);
 
         r = manager_startup(m, arg_serialization, fds);
-        if (r < 0)
+        if (r < 0) {
                 log_error_errno(r, "Failed to fully start up daemon: %m");
+                goto finish;
+        }
 
         /* This will close all file descriptors that were opened, but
          * not claimed by any unit. */

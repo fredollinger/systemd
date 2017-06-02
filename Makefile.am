@@ -39,12 +39,12 @@ SUBDIRS = . po
 .PRECIOUS: $(TEST_SUITE_LOG) Makefile
 
 LIBUDEV_CURRENT=7
-LIBUDEV_REVISION=5
+LIBUDEV_REVISION=6
 LIBUDEV_AGE=6
 
-LIBSYSTEMD_CURRENT=17
+LIBSYSTEMD_CURRENT=18
 LIBSYSTEMD_REVISION=0
-LIBSYSTEMD_AGE=17
+LIBSYSTEMD_AGE=18
 
 # Dirs of external packages
 dbuspolicydir=@dbuspolicydir@
@@ -59,7 +59,7 @@ polkitrulesdir=$(datadir)/polkit-1/rules.d
 polkitpkladir=$(localstatedir)/lib/polkit-1/localauthority/10-vendor.d
 bashcompletiondir=@bashcompletiondir@
 zshcompletiondir=@zshcompletiondir@
-rpmmacrosdir=$(prefix)/lib/rpm/macros.d
+rpmmacrosdir=@rpmmacrosdir@
 sysvinitdir=$(SYSTEM_SYSVINIT_PATH)
 sysvrcnddir=$(SYSTEM_SYSVRCND_PATH)
 varlogdir=$(localstatedir)/log
@@ -68,6 +68,7 @@ catalogstatedir=$(systemdstatedir)/catalog
 xinitrcdir=$(sysconfdir)/X11/xinit/xinitrc.d
 
 # Our own, non-special dirs
+environmentdir=$(prefix)/lib/environment.d
 pkgsysconfdir=$(sysconfdir)/systemd
 userunitdir=$(prefix)/lib/systemd/user
 userpresetdir=$(prefix)/lib/systemd/user-preset
@@ -80,6 +81,8 @@ networkdir=$(rootprefix)/lib/systemd/network
 pkgincludedir=$(includedir)/systemd
 systemgeneratordir=$(rootlibexecdir)/system-generators
 usergeneratordir=$(prefix)/lib/systemd/user-generators
+systemenvgeneratordir=$(prefix)/lib/systemd/system-environment-generators
+userenvgeneratordir=$(prefix)/lib/systemd/user-environment-generators
 systemshutdowndir=$(rootlibexecdir)/system-shutdown
 systemsleepdir=$(rootlibexecdir)/system-sleep
 systemunitdir=$(rootprefix)/lib/systemd/system
@@ -93,6 +96,7 @@ kernelinstalldir = $(prefix)/lib/kernel/install.d
 factory_etcdir = $(datadir)/factory/etc
 factory_pamdir = $(datadir)/factory/etc/pam.d
 bootlibdir = $(prefix)/lib/systemd/boot/efi
+testsdir = $(prefix)/lib/systemd/tests
 
 # And these are the special ones for /
 rootprefix=@rootprefix@
@@ -133,6 +137,7 @@ check_DATA =
 dist_rootlibexec_DATA =
 tests=
 manual_tests =
+TEST_DATA_FILES =
 TEST_EXTENSIONS = .py
 PY_LOG_COMPILER = $(PYTHON)
 DISABLE_HARD_ERRORS = yes
@@ -149,7 +154,8 @@ TESTS =
 endif
 AM_TESTS_ENVIRONMENT = \
 	export SYSTEMD_KBD_MODEL_MAP=$(abs_top_srcdir)/src/locale/kbd-model-map; \
-	export SYSTEMD_LANGUAGE_FALLBACK_MAP=$(abs_top_srcdir)/src/locale/language-fallback-map;
+	export SYSTEMD_LANGUAGE_FALLBACK_MAP=$(abs_top_srcdir)/src/locale/language-fallback-map; \
+	export PATH=$(abs_top_builddir):$$PATH;
 
 if ENABLE_BASH_COMPLETION
 dist_bashcompletion_DATA = $(dist_bashcompletion_data)
@@ -172,6 +178,7 @@ CLEANFILES = $(BUILT_SOURCES) \
 	$(pkgconfiglib_DATA) \
 	$(nodist_bashcompletion_data) \
 	$(nodist_zshcompletion_data) \
+	$(nodist_rpmmacros_DATA) \
 	$(in_files:.in=) $(in_in_files:.in.in=) \
 	$(m4_files:.m4=)
 
@@ -204,6 +211,8 @@ AM_CPPFLAGS = \
 	-DSYSTEMD_CRYPTSETUP_PATH=\"$(rootlibexecdir)/systemd-cryptsetup\" \
 	-DSYSTEM_GENERATOR_PATH=\"$(systemgeneratordir)\" \
 	-DUSER_GENERATOR_PATH=\"$(usergeneratordir)\" \
+	-DSYSTEM_ENV_GENERATOR_PATH=\"$(systemenvgeneratordir)\" \
+	-DUSER_ENV_GENERATOR_PATH=\"$(userenvgeneratordir)\" \
 	-DSYSTEM_SHUTDOWN_PATH=\"$(systemshutdowndir)\" \
 	-DSYSTEM_SLEEP_PATH=\"$(systemsleepdir)\" \
 	-DSYSTEMD_KBD_MODEL_MAP=\"$(pkgdatadir)/kbd-model-map\" \
@@ -217,7 +226,6 @@ AM_CPPFLAGS = \
 	-DLIBDIR=\"$(libdir)\" \
 	-DROOTLIBDIR=\"$(rootlibdir)\" \
 	-DROOTLIBEXECDIR=\"$(rootlibexecdir)\" \
-	-DTEST_DIR=\"$(abs_top_srcdir)/test\" \
 	-I $(top_srcdir)/src \
 	-I $(top_builddir)/src/basic \
 	-I $(top_srcdir)/src/basic \
@@ -249,6 +257,8 @@ AM_CPPFLAGS = \
 	-I $(top_srcdir)/src/libsystemd/sd-device \
 	-I $(top_srcdir)/src/libsystemd/sd-id128 \
 	-I $(top_srcdir)/src/libsystemd-network \
+	-DABS_SRC_DIR=\"$(abs_top_srcdir)\" \
+	-DABS_BUILD_DIR=\"$(abs_top_builddir)\" \
 	$(OUR_CPPFLAGS)
 
 AM_CFLAGS = $(OUR_CFLAGS)
@@ -303,6 +313,10 @@ endef
 install-directories-hook:
 	$(MKDIR_P) $(addprefix $(DESTDIR),$(INSTALL_DIRS))
 
+install-environment-conf-hook: install-directories-hook
+	$(AM_V_LN)$(LN_S) --relative -f $(DESTDIR)$(sysconfdir)/environment \
+		$(DESTDIR)$(environmentdir)/99-environment.conf
+
 install-aliases-hook:
 	set -- $(SYSTEM_UNIT_ALIASES) && \
 		dir=$(systemunitdir) && $(install-aliases)
@@ -336,10 +350,13 @@ INSTALL_EXEC_HOOKS += \
 	install-target-wants-hook \
 	install-directories-hook \
 	install-aliases-hook \
-	install-touch-usr-hook
-
-INSTALL_EXEC_HOOKS += \
+	install-touch-usr-hook \
 	install-busnames-target-wants-hook
+
+if ENABLE_ENVIRONMENT_D
+INSTALL_EXEC_HOOKS += \
+	install-environment-conf-hook
+endif
 
 # ------------------------------------------------------------------------------
 AM_V_M4 = $(AM_V_M4_$(V))
@@ -396,6 +413,7 @@ rootlibexec_PROGRAMS = \
 	systemd-initctl \
 	systemd-shutdown \
 	systemd-remount-fs \
+	systemd-volatile-root \
 	systemd-reply-password \
 	systemd-fsck \
 	systemd-ac-power \
@@ -403,6 +421,11 @@ rootlibexec_PROGRAMS = \
 	systemd-sleep \
 	systemd-socket-proxyd \
 	systemd-update-done
+
+if HAVE_BLKID
+rootlibexec_PROGRAMS += \
+	systemd-dissect
+endif
 
 if HAVE_UTMP
 rootlibexec_PROGRAMS += \
@@ -414,6 +437,17 @@ systemgenerator_PROGRAMS = \
 	systemd-fstab-generator \
 	systemd-system-update-generator \
 	systemd-debug-generator
+
+if ENABLE_ENVIRONMENT_D
+userenvgenerator_PROGRAMS = \
+	30-systemd-environment-d-generator
+endif
+
+rootlibexec_SCRIPTS = \
+	src/sulogin-shell/systemd-sulogin-shell
+
+EXTRA_DIST += \
+	src/sulogin-shell/systemd-sulogin-shell.in
 
 dist_bashcompletion_data = \
 	shell-completion/bash/busctl \
@@ -532,6 +566,7 @@ nodist_systemunit_DATA = \
 	units/system-update-cleanup.service \
 	units/systemd-initctl.service \
 	units/systemd-remount-fs.service \
+	units/systemd-volatile-root.service \
 	units/systemd-ask-password-wall.service \
 	units/systemd-ask-password-console.service \
 	units/systemd-sysctl.service \
@@ -596,6 +631,7 @@ EXTRA_DIST += \
 	units/system-update-cleanup.service.in \
 	units/systemd-initctl.service.in \
 	units/systemd-remount-fs.service.in \
+	units/systemd-volatile-root.service.in \
 	units/systemd-update-utmp.service.in \
 	units/systemd-update-utmp-runlevel.service.in \
 	units/systemd-ask-password-wall.service.in \
@@ -621,7 +657,7 @@ EXTRA_DIST += \
 	units/initrd-switch-root.service.in \
 	units/systemd-nspawn@.service.in \
 	units/systemd-update-done.service.in \
-    units/tmp.mount.m4
+	units/tmp.mount.m4
 
 if HAVE_SYSV_COMPAT
 nodist_systemunit_DATA += \
@@ -648,8 +684,6 @@ dist_doc_DATA = \
 	LICENSE.LGPL2.1 \
 	LICENSE.GPL2 \
 	DISTRO_PORTING \
-	src/libsystemd/sd-bus/PORTING-DBUS1 \
-	src/libsystemd/sd-bus/DIFFERENCES \
 	src/libsystemd/sd-bus/GVARIANT-SERIALIZATION
 
 EXTRA_DIST += \
@@ -663,6 +697,15 @@ EXTRA_DIST += \
 	.mailmap
 
 @INTLTOOL_POLICY_RULE@
+
+systemd-mount-install-hook:
+	-$(LN_S) systemd-mount $(DESTDIR)$(bindir)/systemd-umount
+
+systemd-mount-uninstall-hook:
+	-rm $(DESTDIR)$(bindir)/systemd-umount
+
+INSTALL_EXEC_HOOKS += systemd-mount-install-hook
+UNINSTALL_EXEC_HOOKS += systemd-mount-uninstall-hook
 
 # ------------------------------------------------------------------------------
 
@@ -706,8 +749,10 @@ man/index.html: man/systemd.index.html
 	$(AM_V_LN)$(LN_S) -f systemd.index.html $@
 
 if HAVE_PYTHON
+if ENABLE_MANPAGES
 noinst_DATA += \
 	man/index.html
+endif
 endif
 
 CLEANFILES += \
@@ -743,7 +788,9 @@ EXTRA_DIST += \
 	tools/make-man-rules.py \
 	tools/make-directive-index.py \
 	tools/xml_helper.py \
-	man/glib-event-glue.c
+	man/glib-event-glue.c \
+	man/50-xdg-data-dirs.sh \
+	man/90-rearrange-path.py
 
 # ------------------------------------------------------------------------------
 noinst_LTLIBRARIES += \
@@ -855,6 +902,8 @@ libbasic_la_SOURCES = \
 	src/basic/bus-label.h \
 	src/basic/ratelimit.h \
 	src/basic/ratelimit.c \
+	src/basic/exec-util.c \
+	src/basic/exec-util.h \
 	src/basic/exit-status.c \
 	src/basic/exit-status.h \
 	src/basic/virt.c \
@@ -938,7 +987,11 @@ libbasic_la_SOURCES = \
 	src/basic/alloc-util.h \
 	src/basic/alloc-util.c \
 	src/basic/format-util.h \
-	src/basic/nss-util.h
+	src/basic/nss-util.h \
+	src/basic/khash.h \
+	src/basic/khash.c \
+	src/basic/journal-importer.h \
+	src/basic/journal-importer.c
 
 nodist_libbasic_la_SOURCES = \
 	src/basic/errno-from-name.h \
@@ -959,8 +1012,7 @@ libbasic_la_CFLAGS = \
 libbasic_la_LIBADD = \
 	$(SELINUX_LIBS) \
 	$(CAP_LIBS) \
-	-lrt \
-	-lm
+	-lrt
 
 # -----------------------------------------------------------------------------
 noinst_LTLIBRARIES += \
@@ -971,7 +1023,9 @@ libshared_la_SOURCES = \
 	src/shared/output-mode.c \
 	src/shared/gpt.h \
 	src/shared/udev-util.h \
+	src/shared/udev-util.c \
 	src/shared/linux/auto_dev-ioctl.h \
+	src/shared/linux-3.13/dm-ioctl.h \
 	src/shared/initreq.h \
 	src/shared/dns-domain.c \
 	src/shared/dns-domain.h \
@@ -991,6 +1045,8 @@ libshared_la_SOURCES = \
 	src/shared/apparmor-util.h \
 	src/shared/ima-util.c \
 	src/shared/ima-util.h \
+	src/shared/journal-util.c \
+	src/shared/journal-util.h \
 	src/shared/ptyfwd.c \
 	src/shared/ptyfwd.h \
 	src/shared/base-filesystem.c \
@@ -1042,6 +1098,8 @@ libshared_la_SOURCES = \
 	src/shared/machine-image.h \
 	src/shared/machine-pool.c \
 	src/shared/machine-pool.h \
+	src/shared/loop-util.c \
+	src/shared/loop-util.h \
 	src/shared/resolve-util.c \
 	src/shared/resolve-util.h \
 	src/shared/bus-unit-util.c \
@@ -1053,7 +1111,11 @@ libshared_la_SOURCES = \
 	src/shared/fdset.c \
 	src/shared/fdset.h \
 	src/shared/nsflags.h \
-	src/shared/nsflags.c
+	src/shared/nsflags.c \
+	src/shared/dissect-image.c \
+	src/shared/dissect-image.h \
+	src/shared/volatile-util.c \
+	src/shared/volatile-util.h
 
 if HAVE_UTMP
 libshared_la_SOURCES += \
@@ -1076,7 +1138,10 @@ libshared_la_CFLAGS = \
 	$(AM_CFLAGS) \
 	$(ACL_CFLAGS) \
 	$(LIBIDN_CFLAGS) \
-	$(SECCOMP_CFLAGS)
+	$(LIBIDN2_CFLAGS) \
+	$(SECCOMP_CFLAGS) \
+	$(BLKID_CFLAGS) \
+	$(LIBCRYPTSETUP_CFLAGS)
 
 libshared_la_LIBADD = \
 	libsystemd-internal.la \
@@ -1085,7 +1150,10 @@ libshared_la_LIBADD = \
 	libudev-internal.la \
 	$(ACL_LIBS) \
 	$(LIBIDN_LIBS) \
-	$(SECCOMP_LIBS)
+	$(LIBIDN2_LIBS) \
+	$(SECCOMP_LIBS) \
+	$(BLKID_LIBS) \
+	$(LIBCRYPTSETUP_LIBS)
 
 rootlibexec_LTLIBRARIES += \
 	libsystemd-shared.la
@@ -1106,7 +1174,10 @@ libsystemd_shared_la_CFLAGS = \
 	$(libudev_internal_la_CFLAGS) \
 	$(ACL_CFLAGS) \
 	$(LIBIDN_CFLAGS) \
+	$(LIBIDN2_CFLAGS) \
 	$(SECCOMP_CFLAGS) \
+	$(BLKID_CFLAGS) \
+	$(LIBCRYPTSETUP_CFLAGS) \
 	-fvisibility=default
 
 # We can't use libshared_la_LIBADD here because it would
@@ -1118,7 +1189,10 @@ libsystemd_shared_la_LIBADD = \
 	$(libudev_internal_la_LIBADD) \
 	$(ACL_LIBS) \
 	$(LIBIDN_LIBS) \
-	$(SECCOMP_LIBS)
+	$(LIBIDN2_LIBS) \
+	$(SECCOMP_LIBS) \
+	$(BLKID_LIBS) \
+	$(LIBCRYPTSETUP_LIBS)
 
 libsystemd_shared_la_LDFLAGS = \
 	$(AM_LDFLAGS) \
@@ -1436,8 +1510,10 @@ polkitpolicy_in_in_files += \
 pkgconfigdata_DATA += \
 	src/core/systemd.pc
 
+if ENABLE_RPM_MACROS
 nodist_rpmmacros_DATA = \
 	src/core/macros.systemd
+endif
 
 BUILT_SOURCES += \
 	src/core/triggers.systemd
@@ -1456,7 +1532,8 @@ manual_tests += \
 	test-btrfs \
 	test-acd \
 	test-ipv4ll-manual \
-	test-ask-password-api
+	test-ask-password-api \
+	test-dissect-image
 
 unsafe_tests = \
 	test-hostname \
@@ -1492,6 +1569,8 @@ tests += \
 	test-utf8 \
 	test-ellipsize \
 	test-util \
+	test-mount-util \
+	test-exec-util \
 	test-cpu-set-util \
 	test-hexdecoct \
 	test-escape \
@@ -1558,7 +1637,8 @@ tests += \
 	test-rlimit-util \
 	test-signal-util \
 	test-selinux \
-	test-sizeof
+	test-sizeof \
+	test-journal-importer
 
 if HAVE_ACL
 tests += \
@@ -1570,7 +1650,7 @@ tests += \
 	test-seccomp
 endif
 
-EXTRA_DIST += \
+TEST_DATA_FILES += \
 	test/a.service \
 	test/basic.target \
 	test/b.service \
@@ -1657,6 +1737,7 @@ EXTRA_DIST += \
 	test/test-execute/exec-readonlypaths-mount-propagation.service \
 	test/test-execute/exec-readwritepaths-mount-propagation.service \
 	test/test-execute/exec-inaccessiblepaths-mount-propagation.service \
+	test/test-execute/exec-inaccessiblepaths-proc.service \
 	test/test-execute/exec-spec-interpolation.service \
 	test/test-execute/exec-systemcallerrornumber.service \
 	test/test-execute/exec-systemcallfilter-failing2.service \
@@ -1694,13 +1775,17 @@ EXTRA_DIST += \
 	test/test-execute/exec-restrict-namespaces-yes.service \
 	test/test-execute/exec-restrict-namespaces-mnt.service \
 	test/test-execute/exec-restrict-namespaces-mnt-blacklist.service \
+	test/test-execute/exec-read-only-path-succeed.service \
+	test/test-execute/exec-privatedevices-yes-capability-sys-rawio.service \
+	test/test-execute/exec-privatedevices-no-capability-sys-rawio.service \
 	test/bus-policy/hello.conf \
 	test/bus-policy/methods.conf \
 	test/bus-policy/ownerships.conf \
 	test/bus-policy/signals.conf \
 	test/bus-policy/check-own-rules.conf \
 	test/bus-policy/many-rules.conf \
-	test/bus-policy/test.conf
+	test/bus-policy/test.conf \
+	test/hwdb/10-bad.hwdb
 
 
 EXTRA_DIST += \
@@ -1867,6 +1952,18 @@ test_util_SOURCES = \
 	src/test/test-util.c
 
 test_util_LDADD = \
+	libsystemd-shared.la
+
+test_mount_util_SOURCES = \
+	src/test/test-mount-util.c
+
+test_mount_util_LDADD = \
+	libsystemd-shared.la
+
+test_exec_util_SOURCES = \
+	src/test/test-exec-util.c
+
+test_exec_util_LDADD = \
 	libsystemd-shared.la
 
 test_hexdecoct_SOURCES = \
@@ -2048,6 +2145,10 @@ test_acl_util_LDADD = \
 test_seccomp_SOURCES = \
 	src/test/test-seccomp.c
 
+test_seccomp_CFLAGS = \
+	$(AM_CFLAGS) \
+	$(SECCOMP_CFLAGS)
+
 test_seccomp_LDADD = \
 	libsystemd-shared.la \
 	$(SECCOMP_LIBS)
@@ -2067,6 +2168,17 @@ test_ask_password_api_SOURCES = \
 test_ask_password_api_LDADD = \
 	libsystemd-shared.la
 
+test_dissect_image_SOURCES = \
+	src/test/test-dissect-image.c
+
+test_dissect_image_CFLAGS = \
+	$(AM_CFLAGS) \
+	$(BLKID_CFLAGS)
+
+test_dissect_image_LDADD = \
+	libsystemd-shared.la \
+	$(BLKID_LIBS)
+
 test_signal_util_SOURCES = \
 	src/test/test-signal-util.c
 
@@ -2081,9 +2193,6 @@ test_selinux_LDADD = \
 
 test_sizeof_SOURCES = \
 	src/test/test-sizeof.c
-
-test_sizeof_LDADD = \
-	libsystemd-shared.la
 
 BUILT_SOURCES += \
 	src/test/test-hashmap-ordered.c
@@ -2336,6 +2445,7 @@ test_execute_SOURCES = \
 
 test_execute_CFLAGS = \
 	$(AM_CFLAGS) \
+	$(SECCOMP_CFLAGS) \
 	$(MOUNT_CFLAGS)
 
 test_execute_LDADD = \
@@ -2402,6 +2512,16 @@ test_arphrd_list_SOURCES = \
 
 test_arphrd_list_LDADD = \
 	libsystemd-shared.la
+
+test_journal_importer_SOURCES = \
+	src/test/test-journal-importer.c
+
+test_journal_importer_LDADD = \
+	libsystemd-shared.la
+
+TEST_DATA_FILES += \
+	test/journal-data/journal-1.txt \
+	test/journal-data/journal-2.txt
 
 # ------------------------------------------------------------------------------
 ## .PHONY so it always rebuilds it
@@ -2556,13 +2676,13 @@ nodist_systemunit_DATA += \
 
 nodist_tmpfiles_DATA = \
 	tmpfiles.d/systemd.conf \
+	tmpfiles.d/var.conf \
 	tmpfiles.d/etc.conf
 
 dist_tmpfiles_DATA = \
 	tmpfiles.d/systemd-nologin.conf \
 	tmpfiles.d/tmp.conf \
 	tmpfiles.d/x11.conf \
-	tmpfiles.d/var.conf \
 	tmpfiles.d/home.conf \
 	tmpfiles.d/systemd-nspawn.conf \
 	tmpfiles.d/journal-nocow.conf
@@ -2570,6 +2690,11 @@ dist_tmpfiles_DATA = \
 if HAVE_SYSV_COMPAT
 dist_tmpfiles_DATA += \
 	tmpfiles.d/legacy.conf
+endif
+
+if HAVE_REMOTE
+nodist_tmpfiles_DATA += \
+	tmpfiles.d/systemd-remote.conf
 endif
 
 SYSINIT_TARGET_WANTS += \
@@ -2589,7 +2714,9 @@ endif
 
 EXTRA_DIST += \
 	tmpfiles.d/systemd.conf.m4 \
+	tmpfiles.d/systemd-remote.conf.m4 \
 	tmpfiles.d/etc.conf.m4 \
+	tmpfiles.d/var.conf.m4 \
 	units/systemd-tmpfiles-setup-dev.service.in \
 	units/systemd-tmpfiles-setup.service.in \
 	units/systemd-tmpfiles-clean.service.in
@@ -2709,9 +2836,6 @@ systemd_detect_virt_SOURCES = \
 systemd_detect_virt_LDADD = \
 	libsystemd-shared.la
 
-INSTALL_EXEC_HOOKS += \
-	systemd-detect-virt-install-hook
-
 # ------------------------------------------------------------------------------
 systemd_delta_SOURCES = \
 	src/delta/delta.c
@@ -2746,6 +2870,13 @@ systemd_system_update_generator_SOURCES = \
 	src/system-update-generator/system-update-generator.c
 
 systemd_system_update_generator_LDADD = \
+	libsystemd-shared.la
+
+# ------------------------------------------------------------------------------
+30_systemd_environment_d_generator_SOURCES = \
+	src/environment-d-generator/environment-d-generator.c
+
+30_systemd_environment_d_generator_LDADD = \
 	libsystemd-shared.la
 
 # ------------------------------------------------------------------------------
@@ -2868,28 +2999,37 @@ if ARCH_AARCH64
 efi_ldflags += --defsym=EFI_SUBSYSTEM=0xa
 EFI_FORMAT = -O binary
 else
+if ARCH_ARM
+efi_ldflags += --defsym=EFI_SUBSYSTEM=0xa
+EFI_FORMAT = -O binary
+else
 EFI_FORMAT = --target=efi-app-$(EFI_ARCH)
+endif
 endif
 endif
 endif
 
 # ------------------------------------------------------------------------------
-systemd_boot_headers = \
-	src/boot/efi/util.h \
+efi_headers = \
 	src/boot/efi/console.h \
+	src/boot/efi/disk.h \
 	src/boot/efi/graphics.h \
-	src/boot/efi/pefile.h \
+	src/boot/efi/linux.h \
 	src/boot/efi/measure.h \
-	src/boot/efi/disk.h
+	src/boot/efi/pefile.h \
+	src/boot/efi/splash.h \
+	src/boot/efi/util.h \
+	src/boot/efi/shim.h
 
 systemd_boot_sources = \
-	src/boot/efi/util.c \
+	src/boot/efi/boot.c \
 	src/boot/efi/console.c \
-	src/boot/efi/graphics.c \
-	src/boot/efi/pefile.c \
 	src/boot/efi/disk.c \
+	src/boot/efi/graphics.c \
 	src/boot/efi/measure.c \
-	src/boot/efi/boot.c
+	src/boot/efi/pefile.c \
+	src/boot/efi/util.c \
+	src/boot/efi/shim.c
 
 EXTRA_DIST += $(systemd_boot_sources) $(systemd_boot_headers)
 
@@ -2901,7 +3041,7 @@ if ENABLE_EFI
 if HAVE_GNUEFI
 bootlib_DATA = $(systemd_boot)
 
-$(top_builddir)/src/boot/efi/%.o: $(top_srcdir)/src/boot/efi/%.c $(addprefix $(top_srcdir)/,$(systemd_boot_headers))
+$(top_builddir)/src/boot/efi/%.o: $(top_srcdir)/src/boot/efi/%.c $(addprefix $(top_srcdir)/,$(efi_headers))
 	@$(MKDIR_P) $(top_builddir)/src/boot/efi/
 	$(AM_V_CC)$(EFI_CC) $(efi_cppflags) $(efi_cflags) -c $< -o $@
 
@@ -2919,24 +3059,15 @@ endif
 CLEANFILES += $(systemd_boot_objects) $(systemd_boot_solib) $(systemd_boot)
 
 # ------------------------------------------------------------------------------
-stub_headers = \
-	src/boot/efi/util.h \
-	src/boot/efi/pefile.h \
-	src/boot/efi/disk.h \
-	src/boot/efi/graphics.h \
-	src/boot/efi/splash.h \
-	src/boot/efi/measure.h \
-	src/boot/efi/linux.h
-
 stub_sources = \
-	src/boot/efi/util.c \
-	src/boot/efi/pefile.c \
 	src/boot/efi/disk.c \
 	src/boot/efi/graphics.c \
-	src/boot/efi/splash.c \
 	src/boot/efi/linux.c \
 	src/boot/efi/measure.c \
-	src/boot/efi/stub.c
+	src/boot/efi/pefile.c \
+	src/boot/efi/splash.c \
+	src/boot/efi/stub.c \
+	src/boot/efi/util.c
 
 EXTRA_DIST += \
 	$(stub_sources) \
@@ -2950,10 +3081,6 @@ stub = linux$(EFI_MACHINE_TYPE_NAME).efi.stub
 if ENABLE_EFI
 if HAVE_GNUEFI
 bootlib_DATA += $(stub)
-
-$(top_builddir)/src/boot/efi/%.o: $(top_srcdir)/src/boot/efi/%.c $(addprefix $(top_srcdir)/,$(stub_headers))
-	@$(MKDIR_P) $(top_builddir)/src/boot/efi/
-	$(AM_V_CC)$(EFI_CC) $(efi_cppflags) $(efi_cflags) -c $< -o $@
 
 $(stub_solib): $(stub_objects)
 	$(AM_V_CCLD)$(LD) $(efi_ldflags) $(stub_objects) \
@@ -2972,8 +3099,8 @@ CLEANFILES += $(stub_objects) $(stub_solib) $(stub)
 # ------------------------------------------------------------------------------
 CLEANFILES += test-efi-disk.img
 
-test-efi-disk.img: $(systemd_boot) $(stub) test/test-efi-create-disk.sh
-	$(AM_V_GEN)test/test-efi-create-disk.sh
+test-efi-disk.img: $(systemd_boot) $(stub) test/splash.bmp test/test-efi-create-disk.sh
+	$(AM_V_GEN)test/test-efi-create-disk.sh $@ $(systemd_boot) $(stub) test/splash.bmp
 
 test-efi: test-efi-disk.img
 	$(QEMU) -machine accel=kvm -m 1024 -bios $(QEMU_BIOS) -snapshot test-efi-disk.img
@@ -3026,6 +3153,13 @@ systemd_remount_fs_LDADD = \
 	libsystemd-shared.la
 
 # ------------------------------------------------------------------------------
+systemd_volatile_root_SOURCES = \
+	src/volatile-root/volatile-root.c
+
+systemd_volatile_root_LDADD = \
+	libsystemd-shared.la
+
+# ------------------------------------------------------------------------------
 systemd_cgroups_agent_SOURCES = \
 	src/cgroups-agent/cgroups-agent.c
 
@@ -3051,6 +3185,13 @@ systemd_notify_SOURCES = \
 	src/notify/notify.c
 
 systemd_notify_LDADD = \
+	libsystemd-shared.la
+
+# ------------------------------------------------------------------------------
+systemd_dissect_SOURCES = \
+	src/dissect/dissect.c
+
+systemd_dissect_LDADD = \
 	libsystemd-shared.la
 
 # ------------------------------------------------------------------------------
@@ -3286,7 +3427,6 @@ noinst_LTLIBRARIES += \
 
 EXTRA_DIST += \
 	src/libsystemd/libsystemd.pc.in \
-	src/libsystemd/sd-bus/DIFFERENCES \
 	src/libsystemd/sd-bus/GVARIANT-SERIALIZATION
 
 libsystemd_la_SOURCES =
@@ -3329,6 +3469,7 @@ tests += \
 	test-bus-zero-copy \
 	test-bus-introspect \
 	test-bus-objects \
+	test-bus-vtable \
 	test-bus-error \
 	test-bus-creds \
 	test-bus-gvariant \
@@ -3396,6 +3537,12 @@ test_bus_objects_SOURCES = \
 	src/libsystemd/sd-bus/test-bus-objects.c
 
 test_bus_objects_LDADD = \
+	libsystemd-shared.la
+
+test_bus_vtable_SOURCES = \
+	src/libsystemd/sd-bus/test-bus-vtable.c
+
+test_bus_vtable_LDADD = \
 	libsystemd-shared.la
 
 test_bus_error_SOURCES = \
@@ -3483,9 +3630,9 @@ test_resolve_LDADD = \
 	libsystemd-shared.la
 
 busctl_SOURCES = \
-	src/libsystemd/sd-bus/busctl.c \
-	src/libsystemd/sd-bus/busctl-introspect.c \
-	src/libsystemd/sd-bus/busctl-introspect.h
+	src/busctl/busctl.c \
+	src/busctl/busctl-introspect.c \
+	src/busctl/busctl-introspect.h
 
 busctl_LDADD = \
 	libsystemd-shared.la
@@ -3505,6 +3652,7 @@ libsystemd_network_la_SOURCES = \
 	src/systemd/sd-ipv4ll.h \
 	src/systemd/sd-ipv4acd.h \
 	src/systemd/sd-ndisc.h \
+	src/systemd/sd-radv.h \
 	src/systemd/sd-dhcp6-client.h \
 	src/systemd/sd-dhcp6-lease.h \
 	src/systemd/sd-lldp.h \
@@ -3528,6 +3676,8 @@ libsystemd_network_la_SOURCES = \
 	src/libsystemd-network/ndisc-internal.h \
 	src/libsystemd-network/ndisc-router.h \
 	src/libsystemd-network/ndisc-router.c \
+	src/libsystemd-network/sd-radv.c \
+	src/libsystemd-network/radv-internal.h \
 	src/libsystemd-network/icmp6-util.h \
 	src/libsystemd-network/icmp6-util.c \
 	src/libsystemd-network/sd-dhcp6-client.c \
@@ -3557,6 +3707,14 @@ test_dhcp_option_SOURCES = \
 test_dhcp_option_LDADD = \
 	libsystemd-network.la \
 	libsystemd-shared.la
+
+test_sd_dhcp_lease_SOURCES = \
+      src/libsystemd-network/dhcp-lease-internal.h \
+      src/libsystemd-network/test-sd-dhcp-lease.c
+
+test_sd_dhcp_lease_LDADD = \
+      libsystemd-network.la \
+      libsystemd-shared.la
 
 test_dhcp_client_SOURCES = \
 	src/systemd/sd-dhcp-client.h \
@@ -3613,6 +3771,16 @@ test_ndisc_rs_LDADD = \
 	libudev.la \
 	libsystemd-shared.la
 
+test_ndisc_ra_SOURCES = \
+	src/systemd/sd-ndisc.h \
+	src/libsystemd-network/icmp6-util.h \
+	src/libsystemd-network/test-ndisc-ra.c
+
+test_ndisc_ra_LDADD = \
+	libsystemd-network.la \
+	libudev.la \
+	libsystemd-shared.la
+
 test_dhcp6_client_SOURCES = \
 	src/systemd/sd-dhcp6-client.h \
 	src/libsystemd-network/dhcp6-internal.h \
@@ -3636,8 +3804,10 @@ tests += \
 	test-dhcp-option \
 	test-dhcp-client \
 	test-dhcp-server \
+	test-sd-dhcp-lease \
 	test-ipv4ll \
 	test-ndisc-rs \
+	test-ndisc-ra \
 	test-dhcp6-client \
 	test-lldp
 
@@ -3695,7 +3865,6 @@ dist_network_DATA = \
 	network/80-container-vz.network
 
 dist_udevrules_DATA += \
-	rules/50-udev-default.rules \
 	rules/60-block.rules \
 	rules/60-drm.rules \
 	rules/60-evdev.rules \
@@ -3703,6 +3872,7 @@ dist_udevrules_DATA += \
 	rules/60-persistent-input.rules \
 	rules/60-persistent-alsa.rules \
 	rules/60-persistent-storage.rules \
+	rules/60-sensor.rules \
 	rules/60-serial.rules \
 	rules/64-btrfs.rules \
 	rules/70-mouse.rules \
@@ -3712,6 +3882,7 @@ dist_udevrules_DATA += \
 	rules/80-net-setup-link.rules
 
 nodist_udevrules_DATA += \
+	rules/50-udev-default.rules \
 	rules/99-systemd.rules
 
 udevconfdir = $(sysconfdir)/udev
@@ -3722,6 +3893,7 @@ pkgconfigdata_DATA += \
 	src/udev/udev.pc
 
 EXTRA_DIST += \
+	rules/50-udev-default.rules.in \
 	rules/99-systemd.rules.in \
 	src/udev/udev.pc.in
 
@@ -3752,7 +3924,7 @@ src/udev/keyboard-keys-list.txt:
 	$(AM_V_GEN)$(CPP) $(CFLAGS) $(AM_CPPFLAGS) $(CPPFLAGS) -dM -include linux/input.h - < /dev/null | $(AWK) '/^#define[ \t]+KEY_[^ ]+[ \t]+[0-9K]/ { if ($$2 != "KEY_MAX") { print $$2 } }' > $@
 
 src/udev/keyboard-keys-from-name.gperf: src/udev/keyboard-keys-list.txt
-	$(AM_V_GEN)$(AWK) 'BEGIN{ print "struct key { const char* name; unsigned short id; };"; print "%null-strings"; print "%%";} { print tolower(substr($$1 ,5)) ", " $$1 }' < $< > $@
+	$(AM_V_GEN)$(AWK) 'BEGIN{ print "struct key_name { const char* name; unsigned short id; };"; print "%null-strings"; print "%%";} { print tolower(substr($$1 ,5)) ", " $$1 }' < $< > $@
 
 src/udev/keyboard-keys-from-name.h: src/udev/keyboard-keys-from-name.gperf
 	$(AM_V_GPERF)$(GPERF) -L ANSI-C -t -N keyboard_lookup_key -H hash_key_name -p -C < $< > $@
@@ -3791,7 +3963,8 @@ gperf_gperf_sources += \
 libudev_core_la_CFLAGS = \
 	$(AM_CFLAGS) \
 	$(BLKID_CFLAGS) \
-	$(KMOD_CFLAGS)
+	$(KMOD_CFLAGS) \
+	-DLOG_REALM=LOG_REALM_UDEV
 
 libudev_core_la_LIBADD = \
 	libsystemd-network.la \
@@ -3822,6 +3995,10 @@ endif
 
 systemd_udevd_SOURCES = \
 	src/udev/udevd.c
+
+systemd_udevd_CFLAGS = \
+	$(AM_CFLAGS) \
+       -DLOG_REALM=LOG_REALM_UDEV
 
 systemd_udevd_LDADD = \
 	libudev-core.la \
@@ -3872,6 +4049,7 @@ dist_udevhwdb_DATA = \
 	hwdb/20-net-ifname.hwdb \
 	hwdb/60-evdev.hwdb \
 	hwdb/60-keyboard.hwdb \
+	hwdb/60-sensor.hwdb \
 	hwdb/70-mouse.hwdb \
 	hwdb/70-pointingstick.hwdb \
 	hwdb/70-touchpad.hwdb
@@ -3941,19 +4119,19 @@ check_DATA += \
 	test/sys
 endif
 
-# packed sysfs test tree
-test/sys: test/sys.tar.xz
-	-rm -rf test/sys
+# sysfs test tree
+test/sys: test/sys-script.py
+	-rm -rf $@
 	$(AM_V_at)$(MKDIR_P) $(dir $@)
-	$(AM_V_GEN)tar -C test/ -xJf $(top_srcdir)/test/sys.tar.xz
-	-touch test/sys
+	$(AM_V_GEN)$(top_srcdir)/test/sys-script.py $(dir $@)
+	-touch $@
 
 test-sys-distclean:
 	-rm -rf test/sys
 DISTCLEAN_LOCAL_HOOKS += test-sys-distclean
 
 EXTRA_DIST += \
-	test/sys.tar.xz \
+	test/sys-script.py \
 	test/udev-test.pl \
 	test/hwdb-test.sh \
 	test/rule-syntax-check.py \
@@ -3965,6 +4143,10 @@ EXTRA_DIST += \
 ata_id_SOURCES = \
 	src/udev/ata_id/ata_id.c
 
+ata_id_CFLAGS = \
+	$(AM_CFLAGS) \
+       -DLOG_REALM=LOG_REALM_UDEV
+
 ata_id_LDADD = \
 	libshared.la
 
@@ -3974,6 +4156,10 @@ udevlibexec_PROGRAMS += \
 # ------------------------------------------------------------------------------
 cdrom_id_SOURCES = \
 	src/udev/cdrom_id/cdrom_id.c
+
+cdrom_id_CFLAGS = \
+	$(AM_CFLAGS) \
+       -DLOG_REALM=LOG_REALM_UDEV
 
 cdrom_id_LDADD = \
 	libshared.la
@@ -3988,6 +4174,10 @@ dist_udevrules_DATA += \
 collect_SOURCES = \
 	src/udev/collect/collect.c
 
+collect_CFLAGS = \
+	$(AM_CFLAGS) \
+       -DLOG_REALM=LOG_REALM_UDEV
+
 collect_LDADD = \
 	libshared.la
 
@@ -4001,6 +4191,10 @@ scsi_id_SOURCES =\
 	src/udev/scsi_id/scsi.h \
 	src/udev/scsi_id/scsi_id.h
 
+scsi_id_CFLAGS = \
+	$(AM_CFLAGS) \
+       -DLOG_REALM=LOG_REALM_UDEV
+
 scsi_id_LDADD = \
 	libshared.la
 
@@ -4013,6 +4207,10 @@ EXTRA_DIST += \
 # ------------------------------------------------------------------------------
 v4l_id_SOURCES = \
 	src/udev/v4l_id/v4l_id.c
+
+v4l_id_CFLAGS = \
+	$(AM_CFLAGS) \
+       -DLOG_REALM=LOG_REALM_UDEV
 
 v4l_id_LDADD = \
 	libshared.la
@@ -4029,6 +4227,10 @@ mtd_probe_SOURCES =  \
 	src/udev/mtd_probe/mtd_probe.h \
 	src/udev/mtd_probe/probe_smartmedia.c
 
+mtd_probe_CFLAGS = \
+	$(AM_CFLAGS) \
+       -DLOG_REALM=LOG_REALM_UDEV
+
 dist_udevrules_DATA += \
 	rules/75-probe_mtd.rules
 
@@ -4044,6 +4246,16 @@ test_id128_LDADD = \
 
 tests += \
 	test-id128
+
+# ------------------------------------------------------------------------------
+test_hash_SOURCES = \
+	src/test/test-hash.c
+
+test_hash_LDADD = \
+	libsystemd-shared.la
+
+tests += \
+	test-hash
 
 # ------------------------------------------------------------------------------
 
@@ -4124,11 +4336,6 @@ systemd_journal_remote_CFLAGS = \
 
 systemd_journal_remote_LDADD += \
 	$(MICROHTTPD_LIBS)
-
-if ENABLE_TMPFILES
-dist_tmpfiles_DATA += \
-	tmpfiles.d/systemd-remote.conf
-endif
 
 if HAVE_GNUTLS
 systemd_journal_remote_LDADD += \
@@ -4425,10 +4632,8 @@ libsystemd_journal_internal_la_SOURCES += \
 libsystemd_journal_internal_la_LIBADD += \
 	$(GCRYPT_LIBS)
 
-# fsprg.c is a drop-in file using void pointer arithmetic
 libsystemd_journal_internal_la_CFLAGS += \
-	$(GCRYPT_CFLAGS) \
-	-Wno-pointer-arith
+	$(GCRYPT_CFLAGS)
 endif
 
 noinst_LTLIBRARIES += \
@@ -4762,10 +4967,12 @@ EXTRA_DIST += \
 # ------------------------------------------------------------------------------
 if HAVE_LIBCRYPTSETUP
 rootlibexec_PROGRAMS += \
-	systemd-cryptsetup
+	systemd-cryptsetup \
+	systemd-veritysetup
 
 systemgenerator_PROGRAMS += \
-	systemd-cryptsetup-generator
+	systemd-cryptsetup-generator \
+	systemd-veritysetup-generator
 
 dist_systemunit_DATA += \
 	units/cryptsetup.target \
@@ -4786,6 +4993,23 @@ systemd_cryptsetup_generator_SOURCES = \
 	src/cryptsetup/cryptsetup-generator.c
 
 systemd_cryptsetup_generator_LDADD = \
+	libsystemd-shared.la
+
+systemd_veritysetup_SOURCES = \
+	src/veritysetup/veritysetup.c
+
+systemd_veritysetup_CFLAGS = \
+	$(AM_CFLAGS) \
+	$(LIBCRYPTSETUP_CFLAGS)
+
+systemd_veritysetup_LDADD = \
+	libsystemd-shared.la \
+	$(LIBCRYPTSETUP_LIBS)
+
+systemd_veritysetup_generator_SOURCES = \
+	src/veritysetup/veritysetup-generator.c
+
+systemd_veritysetup_generator_LDADD = \
 	libsystemd-shared.la
 
 SYSINIT_TARGET_WANTS += \
@@ -4865,10 +5089,6 @@ systemd_localed_LDADD = \
 	libsystemd-shared.la \
 	-ldl
 
-systemd_localed_CFLAGS = \
-	$(AM_CFLAGS) \
-	$(XKBCOMMON_CFLAGS)
-
 nodist_systemunit_DATA += \
 	units/systemd-localed.service
 
@@ -4924,8 +5144,6 @@ dist_bashcompletion_data += \
 dist_zshcompletion_data += \
 	shell-completion/zsh/_localectl
 endif
-
-.PHONY: update-kbd-model-map
 
 polkitpolicy_in_files += \
 	src/locale/org.freedesktop.locale1.policy.in
@@ -5005,6 +5223,25 @@ systemd_timesyncd_LDADD = \
 	libsystemd-network.la \
 	libsystemd-shared.la \
 	-lm
+
+test_timesync_SOURCES = \
+	src/timesync/test-timesync.c \
+	src/timesync/timesyncd-manager.c \
+	src/timesync/timesyncd-manager.h \
+	src/timesync/timesyncd-conf.c \
+	src/timesync/timesyncd-conf.h \
+	src/timesync/timesyncd-server.c \
+	src/timesync/timesyncd-server.h
+
+nodist_test_timesync_SOURCES = \
+	src/timesync/timesyncd-gperf.c
+
+test_timesync_LDADD = \
+	libsystemd-shared.la \
+	-lm
+
+tests += \
+	test-timesync
 
 rootlibexec_PROGRAMS += \
 	systemd-timesyncd
@@ -5447,17 +5684,18 @@ dist_dbuspolicy_DATA += \
 dist_dbussystemservice_DATA += \
 	src/resolve/org.freedesktop.resolve1.service
 
-SYSTEM_UNIT_ALIASES += \
-	systemd-resolved.service dbus-org.freedesktop.resolve1.service
-
 BUSNAMES_TARGET_WANTS += \
 	org.freedesktop.resolve1.busname
 
 GENERAL_ALIASES += \
-	$(systemunitdir)/systemd-resolved.service $(pkgsysconfdir)/system/multi-user.target.wants/systemd-resolved.service
+	$(systemunitdir)/systemd-resolved.service $(pkgsysconfdir)/system/multi-user.target.wants/systemd-resolved.service \
+	$(systemunitdir)/systemd-resolved.service $(pkgsysconfdir)/system/dbus-org.freedesktop.resolve1.service
 
 nodist_pkgsysconf_DATA += \
 	src/resolve/resolved.conf
+
+dist_rootlibexec_DATA += \
+	src/resolve/resolv.conf
 
 libnss_resolve_la_SOURCES = \
 	src/nss-resolve/nss-resolve.sym \
@@ -5474,8 +5712,7 @@ libnss_resolve_la_LDFLAGS = \
 
 libnss_resolve_la_LIBADD = \
 	libsystemd-internal.la \
-	libbasic.la \
-        -ldl
+	libbasic.la
 
 rootlib_LTLIBRARIES += \
 	libnss_resolve.la
@@ -5538,7 +5775,7 @@ test_dns_packet_SOURCES = \
 
 test_dns_packet_CPPFLAGS = \
 	$(AM_CPPFLAGS) \
-	-DRESOLVE_TEST_DIR=\"$(abs_top_srcdir)/src/resolve/test-data\"
+	-I $(top_srcdir)/src/test
 
 test_dns_packet_CFLAGS = \
 	$(AM_CFLAGS) \
@@ -5549,18 +5786,20 @@ test_dns_packet_LDADD = \
 	$(GCRYPT_LIBS) \
 	-lm
 
-EXTRA_DIST += \
-	src/resolve/test-data/_openpgpkey.fedoraproject.org.pkts \
-	src/resolve/test-data/fedoraproject.org.pkts \
-	src/resolve/test-data/gandi.net.pkts \
-	src/resolve/test-data/google.com.pkts \
-	src/resolve/test-data/root.pkts \
-	src/resolve/test-data/sw1a1aa-sw1a2aa-sw1a2ab-sw1a2ac.find.me.uk.pkts \
-	src/resolve/test-data/teamits.com.pkts \
-	src/resolve/test-data/zbyszek@fedoraproject.org.pkts \
-	src/resolve/test-data/_443._tcp.fedoraproject.org.pkts \
-	src/resolve/test-data/kyhwana.org.pkts \
-	src/resolve/test-data/fake-caa.pkts
+TEST_DATA_FILES += \
+	test/test-resolve/_openpgpkey.fedoraproject.org.pkts \
+	test/test-resolve/fedoraproject.org.pkts \
+	test/test-resolve/gandi.net.pkts \
+	test/test-resolve/google.com.pkts \
+	test/test-resolve/root.pkts \
+	test/test-resolve/sw1a1aa-sw1a2aa-sw1a2ab-sw1a2ac.find.me.uk.pkts \
+	test/test-resolve/teamits.com.pkts \
+	test/test-resolve/zbyszek@fedoraproject.org.pkts \
+	test/test-resolve/_443._tcp.fedoraproject.org.pkts \
+	test/test-resolve/kyhwana.org.pkts \
+	test/test-resolve/fake-caa.pkts
+
+EXTRA_DIST += $(TEST_DATA_FILES)
 
 test_dnssec_SOURCES = \
 	src/resolve/test-dnssec.c \
@@ -5594,9 +5833,6 @@ gperf_gperf_sources += \
 EXTRA_DIST += \
 	units/systemd-resolved.service.m4.in \
 	src/resolve/resolved.conf.in
-
-dist_rootlibexec_DATA += \
-	src/resolve/resolv.conf
 
 # ------------------------------------------------------------------------------
 if ENABLE_NETWORKD
@@ -5632,6 +5868,8 @@ libnetworkd_core_la_SOURCES = \
 	src/network/netdev/veth.c \
 	src/network/netdev/vxlan.h \
 	src/network/netdev/vxlan.c \
+	src/network/netdev/geneve.h \
+	src/network/netdev/geneve.c \
 	src/network/netdev/vlan.h \
 	src/network/netdev/vlan.c \
 	src/network/netdev/macvlan.h \
@@ -5657,15 +5895,21 @@ libnetworkd_core_la_SOURCES = \
 	src/network/networkd-link.c \
 	src/network/networkd-link-bus.c \
 	src/network/networkd-ipv4ll.c \
+	src/network/networkd-ipv6-proxy-ndp.h \
+	src/network/networkd-ipv6-proxy-ndp.c \
 	src/network/networkd-dhcp4.c \
 	src/network/networkd-dhcp6.c \
 	src/network/networkd-ndisc.h \
+	src/network/networkd-radv.c \
+	src/network/networkd-radv.h \
 	src/network/networkd-ndisc.c \
 	src/network/networkd-network.h \
 	src/network/networkd-network.c \
 	src/network/networkd-network-bus.c \
 	src/network/networkd-address.h \
 	src/network/networkd-address.c \
+	src/network/networkd-address-label.h \
+	src/network/networkd-address-label.c \
 	src/network/networkd-route.h \
 	src/network/networkd-route.c \
 	src/network/networkd-fdb.h \
@@ -5776,10 +6020,8 @@ dist_dbuspolicy_DATA += \
 GENERAL_ALIASES += \
 	$(systemunitdir)/systemd-networkd.socket $(pkgsysconfdir)/system/sockets.target.wants/systemd-networkd.socket \
 	$(systemunitdir)/systemd-networkd.service $(pkgsysconfdir)/system/multi-user.target.wants/systemd-networkd.service \
-	$(systemunitdir)/systemd-networkd-wait-online.service $(pkgsysconfdir)/system/network-online.target.wants/systemd-networkd-wait-online.service
-
-SYSTEM_UNIT_ALIASES += \
-	systemd-networkd.service dbus-org.freedesktop.network1.service
+	$(systemunitdir)/systemd-networkd-wait-online.service $(pkgsysconfdir)/system/network-online.target.wants/systemd-networkd-wait-online.service \
+	$(systemunitdir)/systemd-networkd.service $(pkgsysconfdir)/system/dbus-org.freedesktop.network1.service
 
 BUSNAMES_TARGET_WANTS += \
 	org.freedesktop.network1.busname
@@ -5802,7 +6044,8 @@ EXTRA_DIST += \
 	src/network/systemd-networkd.pkla \
 	units/systemd-networkd.service.m4.in \
 	units/systemd-networkd-wait-online.service.in \
-	test/networkd-test.py
+	test/networkd-test.py \
+	test/test-exec-deserialization.py
 
 # ------------------------------------------------------------------------------
 if ENABLE_LOGIND
@@ -5907,10 +6150,10 @@ test_login_tables_LDADD = \
 	liblogind-core.la
 
 manual_tests += \
-	test-login \
 	test-inhibit
 
 tests += \
+	test-login \
 	test-login-tables \
 	test-login-shared
 
@@ -6066,6 +6309,8 @@ EXTRA_DIST += \
 	test/TEST-13-NSPAWN-SMOKE/Makefile \
 	test/TEST-13-NSPAWN-SMOKE/create-busybox-container \
 	test/TEST-13-NSPAWN-SMOKE/test.sh \
+	test/TEST-14-MACHINE-ID/Makefile \
+	test/TEST-14-MACHINE-ID/test.sh \
 	test/test-functions
 
 EXTRA_DIST += \
@@ -6100,6 +6345,8 @@ substitutions = \
        '|sysctldir=$(sysctldir)|' \
        '|systemgeneratordir=$(systemgeneratordir)|' \
        '|usergeneratordir=$(usergeneratordir)|' \
+       '|systemenvgeneratordir=$(systemenvgeneratordir)|' \
+       '|userenvgeneratordir=$(userenvgeneratordir)|' \
        '|CERTIFICATEROOT=$(CERTIFICATEROOT)|' \
        '|PACKAGE_VERSION=$(PACKAGE_VERSION)|' \
        '|PACKAGE_NAME=$(PACKAGE_NAME)|' \
@@ -6110,7 +6357,6 @@ substitutions = \
        '|exec_prefix=$(exec_prefix)|' \
        '|libdir=$(libdir)|' \
        '|includedir=$(includedir)|' \
-       '|VERSION=$(VERSION)|' \
        '|rootprefix=$(rootprefix)|' \
        '|udevlibexecdir=$(udevlibexecdir)|' \
        '|SUSHELL=$(SUSHELL)|' \
@@ -6134,6 +6380,7 @@ substitutions = \
        '|KILL_USER_PROCESSES=$(KILL_USER_PROCESSES)|' \
        '|systemuidmax=$(SYSTEM_UID_MAX)|' \
        '|systemgidmax=$(SYSTEM_GID_MAX)|' \
+       '|DEV_KVM_MODE=$(DEV_KVM_MODE)|' \
        '|TTY_GID=$(TTY_GID)|' \
        '|systemsleepdir=$(systemsleepdir)|' \
        '|systemshutdowndir=$(systemshutdowndir)|' \
@@ -6143,6 +6390,7 @@ substitutions = \
 SED_PROCESS = \
 	$(AM_V_GEN)$(MKDIR_P) $(dir $@) && \
 	$(SED) $(subst '|,-e 's|@,$(subst =,\@|,$(subst |',|g',$(substitutions)))) \
+                -e '/^\#\# /d' \
 		< $< > $@
 
 units/%: units/%.in
@@ -6165,6 +6413,10 @@ src/core/%.systemd: src/core/%.systemd.in
 
 src/%.policy.in: src/%.policy.in.in
 	$(SED_PROCESS)
+
+src/sulogin-shell/%: src/sulogin-shell/%.in
+	$(SED_PROCESS)
+	$(AM_V_GEN)chmod +x $@
 
 shell-completion/%: shell-completion/%.in
 	$(SED_PROCESS)
@@ -6209,7 +6461,9 @@ nodist_polkitpolicy_DATA = \
 	$(polkitpolicy_files) \
 	$(polkitpolicy_in_in_files:.policy.in.in=.policy)
 polkitrules_DATA = $(polkitrules_files)
+if ENABLE_POLKIT_PKLA
 polkitpkla_DATA = $(polkitpkla_files)
+endif
 endif
 
 EXTRA_DIST += \
@@ -6233,7 +6487,7 @@ XSLTPROC_FLAGS = \
 	--stringparam funcsynopsis.style ansi \
 	--stringparam man.authors.section.enabled 0 \
 	--stringparam man.copyright.section.enabled 0 \
-	--stringparam systemd.version $(VERSION) \
+	--stringparam systemd.version $(PACKAGE_VERSION) \
 	--path '$(builddir)/man:$(srcdir)/man'
 
 XSLT = $(if $(XSLTPROC), $(XSLTPROC), xsltproc)
@@ -6362,6 +6616,7 @@ INSTALL_DIRS += \
 endif
 
 INSTALL_DIRS += \
+	$(environmentdir) \
 	$(prefix)/lib/modules-load.d \
 	$(sysconfdir)/modules-load.d \
 	$(prefix)/lib/systemd/network \
@@ -6404,6 +6659,7 @@ DISTCHECK_CONFIGURE_FLAGS = \
 	--with-zshcompletiondir=$$dc_install_base/$(zshcompletiondir) \
 	--with-pamlibdir=$$dc_install_base/$(pamlibdir) \
 	--with-pamconfdir=$$dc_install_base/$(pamconfdir) \
+	--with-rpmmacrosdir=$$dc_install_base/$(rpmmacrosdir) \
 	--with-rootprefix=$$dc_install_base \
 	--enable-compat-libs
 
@@ -6447,34 +6703,27 @@ dist-check-includes: $(public_headers)
 	done; exit $$res
 
 .PHONY: hwdb-update
-hwdb-update:
-	( cd $(top_srcdir)/hwdb && \
-	wget -O usb.ids 'http://www.linux-usb.org/usb.ids' && \
-	wget -O pci.ids 'http://pci-ids.ucw.cz/v2.2/pci.ids' && \
-	wget -O ma-large.txt 'http://standards.ieee.org/develop/regauth/oui/oui.txt' && \
-	wget -O ma-medium.txt 'http://standards.ieee.org/develop/regauth/oui28/mam.txt' && \
-	wget -O ma-small.txt 'http://standards.ieee.org/develop/regauth/oui36/oui36.txt' && \
-	wget -O pnp_id_registry.html 'http://www.uefi.org/uefi-pnp-export' && \
-	wget -O acpi_id_registry.html 'http://www.uefi.org/uefi-acpi-export' && \
-	./ids-update.pl && \
-	./acpi-update.py > 20-acpi-vendor.hwdb.base && \
-	patch -p0 -o- 20-acpi-vendor.hwdb.base < 20-acpi-vendor.hwdb.patch > 20-acpi-vendor.hwdb )
+hwdb-update: tools/meson-hwdb-update.sh
+	$< $(top_srcdir)/hwdb
 
 .PHONY: built-sources
 built-sources: $(BUILT_SOURCES)
 
 .PHONY: git-tag
 git-tag:
-	git tag -s "v$(VERSION)" -m "systemd $(VERSION)"
+	git tag -s "v$(PACKAGE_VERSION)" -m "systemd $(PACKAGE_VERSION)"
 
 .PHONY: git-tar
 git-tar:
-	git archive --format=tar --prefix=systemd-$(VERSION)/ HEAD | gzip > systemd-$(VERSION).tar.gz
+	git archive -o systemd-$(PACKAGE_VERSION).tar.gz --prefix=systemd-$(PACKAGE_VERSION)/ HEAD
+
+%.asc: %
+	gpg2 --detach-sign -a -o $@ $<
 
 www_target = www.freedesktop.org:/srv/www.freedesktop.org/www/software/systemd
 
 .PHONY: doc-sync
-doc-sync: all
+doc-sync: man
 	rsync -rlv --delete-excluded --include="*.html" --exclude="*" --omit-dir-times man/ $(www_target)/man/
 
 .PHONY: install-tree
@@ -6491,7 +6740,7 @@ valgrind-tests: $(TESTS)
 		if $(LIBTOOL) --mode=execute file $$f | grep -q shell; then \
 		echo -e "$${x}Skipping non-binary $$f"; else \
 		echo -e "$${x}Running $$f"; \
-		$(LIBTOOL) --mode=execute valgrind -q --leak-check=full --max-stackframe=5242880 --error-exitcode=55 $(builddir)/$$f ; fi; \
+		$(AM_TESTS_ENVIRONMENT) $(LIBTOOL) --mode=execute valgrind -q --leak-check=full --max-stackframe=5242880 --error-exitcode=55 $(builddir)/$$f ; fi; \
 		x="\n\n"; \
 	done
 
@@ -6589,6 +6838,20 @@ tests += \
 	test-libsystemd-sym \
 	test-libudev-sym
 
+.PHONY: install-tests
+install-tests: $(tests) $(TEST_DATA_FILES)
+	for f in $(tests); do \
+	    if [ -x $(top_builddir)/.libs/$$f ]; then \
+		install -D -m 755 $(top_builddir)/.libs/$$f $(DESTDIR)/$(testsdir)/$$f; \
+	    else \
+		install -D -m 755 $(top_builddir)/$$f $(DESTDIR)/$(testsdir)/$$f; \
+	    fi; \
+	done
+	for f in $(TEST_DATA_FILES); do \
+	    install -D -m 644 $(top_srcdir)/$$f $(DESTDIR)/$(testsdir)/testdata/$${f#test/}; \
+	done
+
+
 .PHONY: cppcheck
 cppcheck:
 	cppcheck --enable=all -q $(top_srcdir)
@@ -6597,14 +6860,17 @@ cppcheck:
 print-%:
 	@echo $($*)
 
+.PHONY: git-contrib
 git-contrib:
 	@git shortlog -s `git describe --abbrev=0`.. | cut -c8- | sed 's/ / /g' | awk '{ print $$0 "," }' | sort -u
 
 EXTRA_DIST += \
         tools/gdb-sd_dump_hashmaps.py
 
+.PHONY: list-keys
 list-keys:
 	gpg --verbose --no-options --no-default-keyring --no-auto-key-locate --batch --trust-model=always --keyring=$(srcdir)/src/import/import-pubring.gpg --list-keys
 
+.PHONY: add-key
 add-key:
 	gpg --verbose --no-options --no-default-keyring --no-auto-key-locate --batch --trust-model=always --keyring=$(srcdir)/src/import/import-pubring.gpg --import -

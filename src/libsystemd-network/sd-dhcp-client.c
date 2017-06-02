@@ -825,6 +825,15 @@ static int client_send_request(sd_dhcp_client *client) {
                         return r;
         }
 
+        if (client->vendor_class_identifier) {
+                r = dhcp_option_append(&request->dhcp, optlen, &optoffset, 0,
+                                       SD_DHCP_OPTION_VENDOR_CLASS_IDENTIFIER,
+                                       strlen(client->vendor_class_identifier),
+                                       client->vendor_class_identifier);
+                if (r < 0)
+                        return r;
+        }
+
         r = dhcp_option_append(&request->dhcp, optlen, &optoffset, 0,
                                SD_DHCP_OPTION_END, 0, NULL);
         if (r < 0)
@@ -1546,7 +1555,7 @@ static int client_handle_message(sd_dhcp_client *client, DHCPMessage *message, i
                                 goto error;
                         }
 
-                        r = dhcp_network_bind_udp_socket(client->lease->address, client->port);
+                        r = dhcp_network_bind_udp_socket(client->ifindex, client->lease->address, client->port);
                         if (r < 0) {
                                 log_dhcp_client(client, "could not bind UDP socket");
                                 goto error;
@@ -1646,7 +1655,8 @@ static int client_receive_message_udp(
                 if (errno == EAGAIN || errno == EINTR)
                         return 0;
 
-                return log_dhcp_client_errno(client, errno, "Could not receive message from UDP socket: %m");
+                return log_dhcp_client_errno(client, errno,
+                                             "Could not receive message from UDP socket: %m");
         }
         if ((size_t) len < sizeof(DHCPMessage)) {
                 log_dhcp_client(client, "Too small to be a DHCP message: ignoring");
@@ -1739,9 +1749,8 @@ static int client_receive_message_raw(
                 if (errno == EAGAIN || errno == EINTR)
                         return 0;
 
-                log_dhcp_client(client, "Could not receive message from raw socket: %m");
-
-                return -errno;
+                return log_dhcp_client_errno(client, errno,
+                                             "Could not receive message from raw socket: %m");
         } else if ((size_t)len < sizeof(DHCPPacket))
                 return 0;
 

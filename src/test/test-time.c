@@ -17,9 +17,10 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include "random-util.h"
+#include "string-util.h"
 #include "strv.h"
 #include "time-util.h"
-#include "random-util.h"
 
 static void test_parse_sec(void) {
         usec_t u;
@@ -42,6 +43,10 @@ static void test_parse_sec(void) {
         assert_se(u == 2500 * USEC_PER_MSEC);
         assert_se(parse_sec(".7", &u) >= 0);
         assert_se(u == 700 * USEC_PER_MSEC);
+        assert_se(parse_sec("23us", &u) >= 0);
+        assert_se(u == 23);
+        assert_se(parse_sec("23µs", &u) >= 0);
+        assert_se(u == 23);
         assert_se(parse_sec("infinity", &u) >= 0);
         assert_se(u == USEC_INFINITY);
         assert_se(parse_sec(" infinity ", &u) >= 0);
@@ -244,6 +249,67 @@ static void test_format_timestamp(void) {
         }
 }
 
+static void test_format_timestamp_utc_one(usec_t t, const char *result) {
+        char buf[FORMAT_TIMESTAMP_MAX];
+
+        assert_se(!format_timestamp_utc(buf, sizeof(buf), t) == !result);
+
+        if (result)
+                assert_se(streq(result, buf));
+}
+
+static void test_format_timestamp_utc(void) {
+        test_format_timestamp_utc_one(0, NULL);
+        test_format_timestamp_utc_one(1, "Thu 1970-01-01 00:00:00 UTC");
+        test_format_timestamp_utc_one(USEC_PER_SEC, "Thu 1970-01-01 00:00:01 UTC");
+
+#if SIZEOF_TIME_T == 8
+        test_format_timestamp_utc_one(USEC_TIMESTAMP_FORMATTABLE_MAX, "Thu 9999-12-30 23:59:59 UTC");
+#elif SIZEOF_TIME_T == 4
+        test_format_timestamp_utc_one(USEC_TIMESTAMP_FORMATTABLE_MAX, "Tue 2038-01-19 03:14:07 UTC");
+#endif
+
+        test_format_timestamp_utc_one(USEC_TIMESTAMP_FORMATTABLE_MAX+1, NULL);
+        test_format_timestamp_utc_one(USEC_INFINITY, NULL);
+}
+
+static void test_dual_timestamp_deserialize(void) {
+        int r;
+        dual_timestamp t;
+
+        r = dual_timestamp_deserialize("1234 5678", &t);
+        assert_se(r == 0);
+        assert_se(t.realtime == 1234);
+        assert_se(t.monotonic == 5678);
+
+        r = dual_timestamp_deserialize("1234x 5678", &t);
+        assert_se(r == -EINVAL);
+
+        r = dual_timestamp_deserialize("1234 5678y", &t);
+        assert_se(r == -EINVAL);
+
+        r = dual_timestamp_deserialize("-1234 5678", &t);
+        assert_se(r == -EINVAL);
+
+        r = dual_timestamp_deserialize("1234 -5678", &t);
+        assert_se(r == -EINVAL);
+
+        /* Check that output wasn't modified. */
+        assert_se(t.realtime == 1234);
+        assert_se(t.monotonic == 5678);
+
+        r = dual_timestamp_deserialize("+123 567", &t);
+        assert_se(r == 0);
+        assert_se(t.realtime == 123);
+        assert_se(t.monotonic == 567);
+
+        /* Check that we get "infinity" on overflow. */
+        r = dual_timestamp_deserialize("18446744073709551617 0", &t);
+        assert_se(r == 0);
+        assert_se(t.realtime == USEC_INFINITY);
+        assert_se(t.monotonic == 0);
+}
+
 int main(int argc, char *argv[]) {
         uintmax_t x;
 
@@ -258,6 +324,8 @@ int main(int argc, char *argv[]) {
         test_usec_add();
         test_usec_sub();
         test_format_timestamp();
+        test_format_timestamp_utc();
+        test_dual_timestamp_deserialize();
 
         /* Ensure time_t is signed */
         assert_cc((time_t) -1 < (time_t) 1);

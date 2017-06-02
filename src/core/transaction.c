@@ -632,7 +632,7 @@ static int transaction_apply(Transaction *tr, Manager *m, JobMode mode) {
 
                 job_add_to_run_queue(j);
                 job_add_to_dbus_queue(j);
-                job_start_timer(j);
+                job_start_timer(j, false);
                 job_shutdown_magic(j);
         }
 
@@ -907,7 +907,10 @@ int transaction_add_job_and_dependencies(
                         SET_FOREACH(dep, following, i) {
                                 r = transaction_add_job_and_dependencies(tr, type, dep, ret, false, false, false, ignore_order, e);
                                 if (r < 0) {
-                                        log_unit_warning(dep, "Cannot add dependency job for, ignoring: %s", bus_error_message(e, r));
+                                        log_unit_full(dep,
+                                                      r == -ERFKILL ? LOG_INFO : LOG_WARNING,
+                                                      r, "Cannot add dependency job, ignoring: %s",
+                                                      bus_error_message(e, r));
                                         sd_bus_error_free(e);
                                 }
                         }

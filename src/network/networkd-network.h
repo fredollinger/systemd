@@ -28,9 +28,11 @@
 #include "resolve-util.h"
 
 #include "networkd-address.h"
+#include "networkd-address-label.h"
 #include "networkd-brvlan.h"
 #include "networkd-fdb.h"
 #include "networkd-lldp-tx.h"
+#include "networkd-ipv6-proxy-ndp.h"
 #include "networkd-route.h"
 #include "networkd-util.h"
 #include "netdev/netdev.h"
@@ -81,6 +83,17 @@ typedef struct DUID {
         uint8_t raw_data[MAX_DUID_LEN];
 } DUID;
 
+typedef struct NetworkConfigSection {
+        unsigned line;
+        char filename[];
+} NetworkConfigSection;
+
+int network_config_section_new(const char *filename, unsigned line, NetworkConfigSection **s);
+void network_config_section_free(NetworkConfigSection *network);
+
+DEFINE_TRIVIAL_CLEANUP_FUNC(NetworkConfigSection*, network_config_section_free);
+#define _cleanup_network_config_section_free_ _cleanup_(network_config_section_freep)
+
 typedef struct Manager Manager;
 
 struct Network {
@@ -114,7 +127,7 @@ struct Network {
         char *dhcp_hostname;
         unsigned dhcp_route_metric;
         uint32_t dhcp_route_table;
-        uint32_t dhcp_client_port;
+        uint16_t dhcp_client_port;
         bool dhcp_send_hostname;
         bool dhcp_broadcast;
         bool dhcp_critical;
@@ -145,13 +158,21 @@ struct Network {
         AddressFamilyBoolean link_local;
         bool ipv4ll_route;
 
+        /* IPv6 prefix delegation support */
+        bool router_prefix_delegation;
+        usec_t router_lifetime_usec;
+        uint8_t router_preference;
+        bool router_managed;
+        bool router_other_information;
+
         /* Bridge Support */
         bool use_bpdu;
         bool hairpin;
         bool fast_leave;
         bool allow_port_to_be_root;
         bool unicast_flood;
-        unsigned cost;
+        uint32_t cost;
+        uint16_t priority;
 
         bool use_br_vlan;
         uint16_t pvid;
@@ -164,9 +185,12 @@ struct Network {
         int ipv6_accept_ra;
         int ipv6_dad_transmits;
         int ipv6_hop_limit;
+        int ipv6_proxy_ndp;
         int proxy_arp;
 
         bool ipv6_accept_ra_use_dns;
+        bool active_slave;
+        bool primary_slave;
         DHCPUseDomains ipv6_accept_ra_use_domains;
         uint32_t ipv6_accept_ra_route_table;
 
@@ -186,14 +210,22 @@ struct Network {
         LIST_HEAD(Address, static_addresses);
         LIST_HEAD(Route, static_routes);
         LIST_HEAD(FdbEntry, static_fdb_entries);
+        LIST_HEAD(IPv6ProxyNDPAddress, ipv6_proxy_ndp_addresses);
+        LIST_HEAD(AddressLabel, address_labels);
+        LIST_HEAD(Prefix, static_prefixes);
 
         unsigned n_static_addresses;
         unsigned n_static_routes;
         unsigned n_static_fdb_entries;
+        unsigned n_ipv6_proxy_ndp_addresses;
+        unsigned n_address_labels;
+        unsigned n_static_prefixes;
 
         Hashmap *addresses_by_section;
         Hashmap *routes_by_section;
         Hashmap *fdb_entries_by_section;
+        Hashmap *address_labels_by_section;
+        Hashmap *prefixes_by_section;
 
         struct in_addr_data *dns;
         unsigned n_dns;
@@ -242,7 +274,7 @@ int config_parse_ntp(const char *unit, const char *filename, unsigned line, cons
 /* Legacy IPv4LL support */
 int config_parse_ipv4ll(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 
-const struct ConfigPerfItem* network_network_gperf_lookup(const char *key, unsigned length);
+const struct ConfigPerfItem* network_network_gperf_lookup(const char *key, GPERF_LEN_TYPE length);
 
 extern const sd_bus_vtable network_vtable[];
 

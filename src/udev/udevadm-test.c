@@ -59,7 +59,7 @@ static int adm_test(struct udev *udev, int argc, char *argv[]) {
                 {}
         };
 
-        log_debug("version %s", VERSION);
+        log_debug("version %s", PACKAGE_VERSION);
 
         while ((c = getopt_long(argc, argv, "a:N:h", options, NULL)) >= 0)
                 switch (c) {
@@ -144,7 +144,7 @@ static int adm_test(struct udev *udev, int argc, char *argv[]) {
         udev_list_entry_foreach(entry, udev_list_get_entry(&event->run_list)) {
                 char program[UTIL_PATH_SIZE];
 
-                udev_event_apply_format(event, udev_list_entry_get_name(entry), program, sizeof(program));
+                udev_event_apply_format(event, udev_list_entry_get_name(entry), program, sizeof(program), false);
                 printf("run: '%s'\n", program);
         }
 out:

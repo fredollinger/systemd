@@ -23,7 +23,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <xlocale.h>
 
 #include "alloc-util.h"
 #include "extract-word.h"
@@ -572,5 +571,21 @@ int parse_nice(const char *p, int *ret) {
                 return -ERANGE;
 
         *ret = n;
+        return 0;
+}
+
+int parse_ip_port(const char *s, uint16_t *ret) {
+        uint16_t l;
+        int r;
+
+        r = safe_atou16(s, &l);
+        if (r < 0)
+                return r;
+
+        if (l == 0)
+                return -EINVAL;
+
+        *ret = (uint16_t) l;
+
         return 0;
 }

@@ -36,6 +36,49 @@
 #include "string-util.h"
 #include "util.h"
 
+static void network_config_hash_func(const void *p, struct siphash *state) {
+        const NetworkConfigSection *c = p;
+
+        siphash24_compress(c->filename, strlen(c->filename), state);
+        siphash24_compress(&c->line, sizeof(c->line), state);
+}
+
+static int network_config_compare_func(const void *a, const void *b) {
+        const NetworkConfigSection *x = a, *y = b;
+        int r;
+
+        r = strcmp(x->filename, y->filename);
+        if (r != 0)
+                return r;
+
+        return y->line - x->line;
+}
+
+const struct hash_ops network_config_hash_ops = {
+        .hash = network_config_hash_func,
+        .compare = network_config_compare_func,
+};
+
+int network_config_section_new(const char *filename, unsigned line, NetworkConfigSection **s) {
+        NetworkConfigSection *cs;
+
+        cs = malloc0(offsetof(NetworkConfigSection, filename) + strlen(filename) + 1);
+        if (!cs)
+                return -ENOMEM;
+
+        strcpy(cs->filename, filename);
+        cs->line = line;
+
+        *s = cs;
+        cs = NULL;
+
+        return 0;
+}
+
+void network_config_section_free(NetworkConfigSection *cs) {
+          free(cs);
+}
+
 static int network_load_one(Manager *manager, const char *filename) {
         _cleanup_network_free_ Network *network = NULL;
         _cleanup_fclose_ FILE *file = NULL;
@@ -70,21 +113,32 @@ static int network_load_one(Manager *manager, const char *filename) {
         LIST_HEAD_INIT(network->static_addresses);
         LIST_HEAD_INIT(network->static_routes);
         LIST_HEAD_INIT(network->static_fdb_entries);
+        LIST_HEAD_INIT(network->ipv6_proxy_ndp_addresses);
+        LIST_HEAD_INIT(network->address_labels);
+        LIST_HEAD_INIT(network->static_prefixes);
 
         network->stacked_netdevs = hashmap_new(&string_hash_ops);
         if (!network->stacked_netdevs)
                 return log_oom();
 
-        network->addresses_by_section = hashmap_new(NULL);
+        network->addresses_by_section = hashmap_new(&network_config_hash_ops);
         if (!network->addresses_by_section)
                 return log_oom();
 
-        network->routes_by_section = hashmap_new(NULL);
+        network->routes_by_section = hashmap_new(&network_config_hash_ops);
         if (!network->routes_by_section)
                 return log_oom();
 
         network->fdb_entries_by_section = hashmap_new(NULL);
         if (!network->fdb_entries_by_section)
+                return log_oom();
+
+        network->address_labels_by_section = hashmap_new(&network_config_hash_ops);
+        if (!network->address_labels_by_section)
+                log_oom();
+
+        network->prefixes_by_section = hashmap_new(&network_config_hash_ops);
+        if (!network->prefixes_by_section)
                 return log_oom();
 
         network->filename = strdup(filename);
@@ -121,6 +175,7 @@ static int network_load_one(Manager *manager, const char *filename) {
         network->use_bpdu = true;
         network->allow_port_to_be_root = true;
         network->unicast_flood = true;
+        network->priority = LINK_BRIDGE_PORT_PRIORITY_INVALID;
 
         network->lldp_mode = LLDP_MODE_ROUTERS_ONLY;
 
@@ -134,6 +189,7 @@ static int network_load_one(Manager *manager, const char *filename) {
         network->ipv6_accept_ra = -1;
         network->ipv6_dad_transmits = -1;
         network->ipv6_hop_limit = -1;
+        network->ipv6_proxy_ndp = -1;
         network->duid.type = _DUID_TYPE_INVALID;
         network->proxy_arp = -1;
         network->arp = -1;
@@ -147,14 +203,18 @@ static int network_load_one(Manager *manager, const char *filename) {
                               "Link\0"
                               "Network\0"
                               "Address\0"
+                              "IPv6AddressLabel\0"
                               "Route\0"
                               "DHCP\0"
                               "DHCPv4\0" /* compat */
                               "DHCPServer\0"
                               "IPv6AcceptRA\0"
+                              "IPv6NDPProxyAddress\0"
                               "Bridge\0"
                               "BridgeFDB\0"
-                              "BridgeVLAN\0",
+                              "BridgeVLAN\0"
+                              "IPv6PrefixDelegation\0"
+                              "IPv6Prefix\0",
                               config_item_perf_lookup, network_network_gperf_lookup,
                               false, network);
         if (r < 0)
@@ -224,6 +284,9 @@ void network_free(Network *network) {
         Route *route;
         Address *address;
         FdbEntry *fdb_entry;
+        IPv6ProxyNDPAddress *ipv6_proxy_ndp_address;
+        AddressLabel *label;
+        Prefix *prefix;
         Iterator i;
 
         if (!network)
@@ -268,9 +331,20 @@ void network_free(Network *network) {
         while ((fdb_entry = network->static_fdb_entries))
                 fdb_entry_free(fdb_entry);
 
+        while ((ipv6_proxy_ndp_address = network->ipv6_proxy_ndp_addresses))
+                ipv6_proxy_ndp_address_free(ipv6_proxy_ndp_address);
+
+        while ((label = network->address_labels))
+                address_label_free(label);
+
+        while ((prefix = network->static_prefixes))
+                prefix_free(prefix);
+
         hashmap_free(network->addresses_by_section);
         hashmap_free(network->routes_by_section);
         hashmap_free(network->fdb_entries_by_section);
+        hashmap_free(network->address_labels_by_section);
+        hashmap_free(network->prefixes_by_section);
 
         if (network->manager) {
                 if (network->manager->networks)
@@ -379,7 +453,7 @@ int network_apply(Network *network, Link *link) {
         if (network->ipv4ll_route) {
                 Route *route;
 
-                r = route_new_static(network, 0, &route);
+                r = route_new_static(network, NULL, 0, &route);
                 if (r < 0)
                         return r;
 

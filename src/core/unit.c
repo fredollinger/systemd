@@ -99,6 +99,7 @@ Unit *unit_new(Manager *m, size_t size) {
         u->on_failure_job_mode = JOB_REPLACE;
         u->cgroup_inotify_wd = -1;
         u->job_timeout = USEC_INFINITY;
+        u->job_running_timeout = USEC_INFINITY;
         u->ref_uid = UID_INVALID;
         u->ref_gid = GID_INVALID;
         u->cpu_usage_last = NSEC_INFINITY;
@@ -402,6 +403,7 @@ void unit_add_to_dbus_queue(Unit *u) {
 
         /* Shortcut things if nobody cares */
         if (sd_bus_track_count(u->manager->subscribed) <= 0 &&
+            sd_bus_track_count(u->bus_track) <= 0 &&
             set_isempty(u->manager->private_buses)) {
                 u->sent_dbus_new_signal = true;
                 return;
@@ -862,15 +864,25 @@ int unit_add_exec_dependencies(Unit *u, ExecContext *c) {
                         return r;
         }
 
+        if (c->root_image) {
+                r = unit_require_mounts_for(u, c->root_image);
+                if (r < 0)
+                        return r;
+        }
+
         if (!MANAGER_IS_SYSTEM(u->manager))
                 return 0;
 
         if (c->private_tmp) {
-                r = unit_require_mounts_for(u, "/tmp");
-                if (r < 0)
-                        return r;
+                const char *p;
 
-                r = unit_require_mounts_for(u, "/var/tmp");
+                FOREACH_STRING(p, "/tmp", "/var/tmp") {
+                        r = unit_require_mounts_for(u, p);
+                        if (r < 0)
+                                return r;
+                }
+
+                r = unit_add_dependency_by_name(u, UNIT_AFTER, SPECIAL_TMPFILES_SETUP_SERVICE, NULL, true);
                 if (r < 0)
                         return r;
         }
@@ -944,9 +956,7 @@ void unit_dump(Unit *u, FILE *f, const char *prefix) {
                 "%s\tPerpetual: %s\n"
                 "%s\tSlice: %s\n"
                 "%s\tCGroup: %s\n"
-                "%s\tCGroup realized: %s\n"
-                "%s\tCGroup mask: 0x%x\n"
-                "%s\tCGroup members mask: 0x%x\n",
+                "%s\tCGroup realized: %s\n",
                 prefix, u->id,
                 prefix, unit_description(u),
                 prefix, strna(u->instance),
@@ -963,9 +973,18 @@ void unit_dump(Unit *u, FILE *f, const char *prefix) {
                 prefix, yes_no(u->perpetual),
                 prefix, strna(unit_slice_name(u)),
                 prefix, strna(u->cgroup_path),
-                prefix, yes_no(u->cgroup_realized),
-                prefix, u->cgroup_realized_mask,
-                prefix, u->cgroup_members_mask);
+                prefix, yes_no(u->cgroup_realized));
+
+        if (u->cgroup_realized_mask != 0) {
+                _cleanup_free_ char *s = NULL;
+                (void) cg_mask_to_string(u->cgroup_realized_mask, &s);
+                fprintf(f, "%s\tCGroup mask: %s\n", prefix, strnull(s));
+        }
+        if (u->cgroup_members_mask != 0) {
+                _cleanup_free_ char *s = NULL;
+                (void) cg_mask_to_string(u->cgroup_members_mask, &s);
+                fprintf(f, "%s\tCGroup members mask: %s\n", prefix, strnull(s));
+        }
 
         SET_FOREACH(t, u->names, i)
                 fprintf(f, "%s\tName: %s\n", prefix, t);
@@ -1079,6 +1098,7 @@ void unit_dump(Unit *u, FILE *f, const char *prefix) {
 
 /* Common implementation for multiple backends */
 int unit_load_fragment_and_dropin(Unit *u) {
+        Unit *t;
         int r;
 
         assert(u);
@@ -1091,16 +1111,18 @@ int unit_load_fragment_and_dropin(Unit *u) {
         if (u->load_state == UNIT_STUB)
                 return -ENOENT;
 
-        /* Load drop-in directory data */
-        r = unit_load_dropin(unit_follow_merge(u));
-        if (r < 0)
-                return r;
+        /* If the unit is an alias and the final unit has already been
+         * loaded, there's no point in reloading the dropins one more time. */
+        t = unit_follow_merge(u);
+        if (t != u && t->load_state != UNIT_STUB)
+                return 0;
 
-        return 0;
+        return unit_load_dropin(t);
 }
 
 /* Common implementation for multiple backends */
 int unit_load_fragment_and_dropin_optional(Unit *u) {
+        Unit *t;
         int r;
 
         assert(u);
@@ -1116,12 +1138,13 @@ int unit_load_fragment_and_dropin_optional(Unit *u) {
         if (u->load_state == UNIT_STUB)
                 u->load_state = UNIT_LOADED;
 
-        /* Load drop-in directory data */
-        r = unit_load_dropin(unit_follow_merge(u));
-        if (r < 0)
-                return r;
+        /* If the unit is an alias and the final unit has already been
+         * loaded, there's no point in reloading the dropins one more time. */
+        t = unit_follow_merge(u);
+        if (t != u && t->load_state != UNIT_STUB)
+                return 0;
 
-        return 0;
+        return unit_load_dropin(t);
 }
 
 int unit_add_default_target_dependency(Unit *u, Unit *target) {
@@ -1321,6 +1344,9 @@ int unit_load(Unit *u) {
                         goto fail;
                 }
 
+                if (u->job_running_timeout != USEC_INFINITY && u->job_running_timeout > u->job_timeout)
+                        log_unit_warning(u, "JobRunningTimeoutSec= is greater than JobTimeoutSec=, it has no effect.");
+
                 unit_update_cgroup_members_masks(u);
         }
 
@@ -1452,9 +1478,8 @@ static void unit_status_print_starting_stopping(Unit *u, JobType t) {
 }
 
 static void unit_status_log_starting_stopping_reloading(Unit *u, JobType t) {
-        const char *format;
+        const char *format, *mid;
         char buf[LINE_MAX];
-        sd_id128_t mid;
 
         assert(u);
 
@@ -1472,9 +1497,9 @@ static void unit_status_log_starting_stopping_reloading(Unit *u, JobType t) {
         snprintf(buf, sizeof buf, format, unit_description(u));
         REENABLE_WARNING;
 
-        mid = t == JOB_START ? SD_MESSAGE_UNIT_STARTING :
-              t == JOB_STOP  ? SD_MESSAGE_UNIT_STOPPING :
-                               SD_MESSAGE_UNIT_RELOADING;
+        mid = t == JOB_START ? "MESSAGE_ID=" SD_MESSAGE_UNIT_STARTING_STR :
+              t == JOB_STOP  ? "MESSAGE_ID=" SD_MESSAGE_UNIT_STOPPING_STR :
+                               "MESSAGE_ID=" SD_MESSAGE_UNIT_RELOADING_STR;
 
         /* Note that we deliberately use LOG_MESSAGE() instead of
          * LOG_UNIT_MESSAGE() here, since this is supposed to mimic
@@ -1483,9 +1508,9 @@ static void unit_status_log_starting_stopping_reloading(Unit *u, JobType t) {
          * possible, which means we should avoid the low-level unit
          * name. */
         log_struct(LOG_INFO,
-                   LOG_MESSAGE_ID(mid),
-                   LOG_UNIT_ID(u),
                    LOG_MESSAGE("%s", buf),
+                   LOG_UNIT_ID(u),
+                   mid,
                    NULL);
 }
 
@@ -1513,6 +1538,7 @@ int unit_start_limit_test(Unit *u) {
 }
 
 bool unit_shall_confirm_spawn(Unit *u) {
+        assert(u);
 
         if (manager_is_confirm_spawn_disabled(u->manager))
                 return false;
@@ -1523,6 +1549,31 @@ bool unit_shall_confirm_spawn(Unit *u) {
         return !unit_get_exec_context(u)->same_pgrp;
 }
 
+static bool unit_verify_deps(Unit *u) {
+        Unit *other;
+        Iterator j;
+
+        assert(u);
+
+        /* Checks whether all BindsTo= dependencies of this unit are fulfilled — if they are also combined with
+         * After=. We do not check Requires= or Requisite= here as they only should have an effect on the job
+         * processing, but do not have any effect afterwards. We don't check BindsTo= dependencies that are not used in
+         * conjunction with After= as for them any such check would make things entirely racy. */
+
+        SET_FOREACH(other, u->dependencies[UNIT_BINDS_TO], j) {
+
+                if (!set_contains(u->dependencies[UNIT_AFTER], other))
+                        continue;
+
+                if (!UNIT_IS_ACTIVE_OR_RELOADING(unit_active_state(other))) {
+                        log_unit_notice(u, "Bound to unit %s, but unit isn't active.", other->id);
+                        return false;
+                }
+        }
+
+        return true;
+}
+
 /* Errors:
  *         -EBADR:      This unit type does not support starting.
  *         -EALREADY:   Unit is already started.
@@ -1531,6 +1582,7 @@ bool unit_shall_confirm_spawn(Unit *u) {
  *         -EPROTO:     Assert failed
  *         -EINVAL:     Unit not loaded
  *         -EOPNOTSUPP: Unit type not supported
+ *         -ENOLINK:    The necessary dependencies are not fulfilled.
  */
 int unit_start(Unit *u) {
         UnitActiveState state;
@@ -1575,6 +1627,12 @@ int unit_start(Unit *u) {
          */
         if (!unit_supported(u))
                 return -EOPNOTSUPP;
+
+        /* Let's make sure that the deps really are in order before we start this. Normally the job engine should have
+         * taken care of this already, but let's check this here again. After all, our dependencies might not be in
+         * effect anymore, due to a reload or due to a failed condition. */
+        if (!unit_verify_deps(u))
+                return -ENOLINK;
 
         /* Forward to the main object, if we aren't it. */
         following = unit_following(u);
@@ -2636,7 +2694,7 @@ void unit_unwatch_bus_name(Unit *u, const char *name) {
         assert(u);
         assert(name);
 
-        hashmap_remove_value(u->manager->watch_bus, name, u);
+        (void) hashmap_remove_value(u->manager->watch_bus, name, u);
         u->match_bus_slot = sd_bus_slot_unref(u->match_bus_slot);
 }
 
@@ -2644,6 +2702,25 @@ bool unit_can_serialize(Unit *u) {
         assert(u);
 
         return UNIT_VTABLE(u)->serialize && UNIT_VTABLE(u)->deserialize_item;
+}
+
+static int unit_serialize_cgroup_mask(FILE *f, const char *key, CGroupMask mask) {
+        _cleanup_free_ char *s = NULL;
+        int r = 0;
+
+        assert(f);
+        assert(key);
+
+        if (mask != 0) {
+                r = cg_mask_to_string(mask, &s);
+                if (r >= 0) {
+                        fputs(key, f);
+                        fputc('=', f);
+                        fputs(s, f);
+                        fputc('\n', f);
+                }
+        }
+        return r;
 }
 
 int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs) {
@@ -2693,6 +2770,8 @@ int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs) {
         if (u->cgroup_path)
                 unit_serialize_item(u, f, "cgroup", u->cgroup_path);
         unit_serialize_item(u, f, "cgroup-realized", yes_no(u->cgroup_realized));
+        (void) unit_serialize_cgroup_mask(f, "cgroup-realized-mask", u->cgroup_realized_mask);
+        (void) unit_serialize_cgroup_mask(f, "cgroup-enabled-mask", u->cgroup_enabled_mask);
 
         if (uid_is_valid(u->ref_uid))
                 unit_serialize_item_format(u, f, "ref-uid", UID_FMT, u->ref_uid);
@@ -2950,6 +3029,20 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
 
                         continue;
 
+                } else if (streq(l, "cgroup-realized-mask")) {
+
+                        r = cg_mask_from_string(v, &u->cgroup_realized_mask);
+                        if (r < 0)
+                                log_unit_debug(u, "Failed to parse cgroup-realized-mask %s, ignoring.", v);
+                        continue;
+
+                } else if (streq(l, "cgroup-enabled-mask")) {
+
+                        r = cg_mask_from_string(v, &u->cgroup_enabled_mask);
+                        if (r < 0)
+                                log_unit_debug(u, "Failed to parse cgroup-enabled-mask %s, ignoring.", v);
+                        continue;
+
                 } else if (streq(l, "ref-uid")) {
                         uid_t uid;
 
@@ -3048,6 +3141,9 @@ int unit_add_node_link(Unit *u, const char *what, bool wants, UnitDependency dep
         if (r < 0)
                 return r;
 
+        if (dep == UNIT_REQUIRES && device_shall_be_bound_by(device, u))
+                dep = UNIT_BINDS_TO;
+
         r = unit_add_two_dependencies(u, UNIT_AFTER,
                                       MANAGER_IS_SYSTEM(u->manager) ? dep : UNIT_WANTS,
                                       device, true);
@@ -3102,6 +3198,11 @@ static bool fragment_mtime_newer(const char *path, usec_t mtime, bool path_maske
         struct stat st;
 
         if (!path)
+                return false;
+
+        /* If the source is some virtual kernel file system, then we assume we watch it anyway, and hence pretend we
+         * are never out-of-date. */
+        if (PATH_STARTSWITH_SET(path, "/proc", "/sys"))
                 return false;
 
         if (stat(path, &st) < 0)
@@ -3755,14 +3856,14 @@ int unit_kill_context(
                 bool main_pid_alien) {
 
         bool wait_for_exit = false, send_sighup;
-        cg_kill_log_func_t log_func;
+        cg_kill_log_func_t log_func = NULL;
         int sig, r;
 
         assert(u);
         assert(c);
 
-        /* Kill the processes belonging to this unit, in preparation for shutting the unit down. Returns > 0 if we
-         * killed something worth waiting for, 0 otherwise. */
+        /* Kill the processes belonging to this unit, in preparation for shutting the unit down.
+         * Returns > 0 if we killed something worth waiting for, 0 otherwise. */
 
         if (c->kill_mode == KILL_NONE)
                 return 0;
@@ -3774,9 +3875,8 @@ int unit_kill_context(
                 IN_SET(k, KILL_TERMINATE, KILL_TERMINATE_AND_LOG) &&
                 sig != SIGHUP;
 
-        log_func =
-                k != KILL_TERMINATE ||
-                IN_SET(sig, SIGKILL, SIGABRT) ? log_kill : NULL;
+        if (k != KILL_TERMINATE || IN_SET(sig, SIGKILL, SIGABRT))
+                log_func = log_kill;
 
         if (main_pid > 0) {
                 if (log_func)
@@ -3847,10 +3947,10 @@ int unit_kill_context(
                          * should not exist in non-delegated units. On
                          * the unified hierarchy that's different,
                          * there we get proper events. Hence rely on
-                         * them.*/
+                         * them. */
 
-                        if  (cg_unified(SYSTEMD_CGROUP_CONTROLLER) > 0 ||
-                             (detect_container() == 0 && !unit_cgroup_delegate(u)))
+                        if (cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER) > 0 ||
+                            (detect_container() == 0 && !unit_cgroup_delegate(u)))
                                 wait_for_exit = true;
 
                         if (send_sighup) {
@@ -4020,7 +4120,7 @@ void unit_warn_if_dir_nonempty(Unit *u, const char* where) {
         }
 
         log_struct(LOG_NOTICE,
-                   LOG_MESSAGE_ID(SD_MESSAGE_OVERMOUNTING),
+                   "MESSAGE_ID=" SD_MESSAGE_OVERMOUNTING_STR,
                    LOG_UNIT_ID(u),
                    LOG_UNIT_MESSAGE(u, "Directory %s to mount over is not empty, mounting anyway.", where),
                    "WHERE=%s", where,
@@ -4042,7 +4142,7 @@ int unit_fail_if_symlink(Unit *u, const char* where) {
                 return 0;
 
         log_struct(LOG_ERR,
-                   LOG_MESSAGE_ID(SD_MESSAGE_OVERMOUNTING),
+                   "MESSAGE_ID=" SD_MESSAGE_OVERMOUNTING_STR,
                    LOG_UNIT_ID(u),
                    LOG_UNIT_MESSAGE(u, "Mount on symlink %s not allowed.", where),
                    "WHERE=%s", where,

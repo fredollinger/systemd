@@ -39,6 +39,8 @@ struct in_addr_data {
 bool in4_addr_is_null(const struct in_addr *a);
 int in_addr_is_null(int family, const union in_addr_union *u);
 
+int in_addr_is_multicast(int family, const union in_addr_union *u);
+
 bool in4_addr_is_link_local(const struct in_addr *a);
 int in_addr_is_link_local(int family, const union in_addr_union *u);
 
@@ -58,6 +60,7 @@ struct in_addr* in_addr_prefixlen_to_netmask(struct in_addr *addr, unsigned char
 int in_addr_default_prefixlen(const struct in_addr *addr, unsigned char *prefixlen);
 int in_addr_default_subnet_mask(const struct in_addr *addr, struct in_addr *mask);
 int in_addr_mask(int family, union in_addr_union *addr, unsigned char prefixlen);
+int in_addr_prefix_from_string(const char *p, int family, union in_addr_union *ret_prefix, uint8_t *ret_prefixlen);
 
 static inline size_t FAMILY_ADDRESS_SIZE(int family) {
         assert(family == AF_INET || family == AF_INET6);

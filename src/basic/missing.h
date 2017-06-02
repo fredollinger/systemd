@@ -34,6 +34,7 @@
 #include <net/ethernet.h>
 #include <stdlib.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <uchar.h>
 #include <unistd.h>
@@ -50,7 +51,22 @@
 #include <linux/btrfs.h>
 #endif
 
-#include "macro.h"
+#ifdef HAVE_LINUX_VM_SOCKETS_H
+#include <linux/vm_sockets.h>
+#else
+#define VMADDR_CID_ANY -1U
+struct sockaddr_vm {
+        unsigned short svm_family;
+        unsigned short svm_reserved1;
+        unsigned int svm_port;
+        unsigned int svm_cid;
+        unsigned char svm_zero[sizeof(struct sockaddr) -
+                               sizeof(unsigned short) -
+                               sizeof(unsigned short) -
+                               sizeof(unsigned int) -
+                               sizeof(unsigned int)];
+};
+#endif /* !HAVE_LINUX_VM_SOCKETS_H */
 
 #ifndef RLIMIT_RTTIME
 #define RLIMIT_RTTIME 15
@@ -708,7 +724,7 @@ struct btrfs_ioctl_quota_ctl_args {
 #define IFLA_VLAN_MAX   (__IFLA_VLAN_MAX - 1)
 #endif
 
-#if !HAVE_DECL_IFLA_VXLAN_REMCSUM_NOPARTIAL
+#if !HAVE_DECL_IFLA_VXLAN_GPE
 #define IFLA_VXLAN_UNSPEC 0
 #define IFLA_VXLAN_ID 1
 #define IFLA_VXLAN_GROUP 2
@@ -734,9 +750,32 @@ struct btrfs_ioctl_quota_ctl_args {
 #define IFLA_VXLAN_REMCSUM_RX 22
 #define IFLA_VXLAN_GBP 23
 #define IFLA_VXLAN_REMCSUM_NOPARTIAL 24
-#define __IFLA_VXLAN_MAX 25
+#define IFLA_VXLAN_COLLECT_METADATA 25
+#define IFLA_VXLAN_LABEL 26
+#define IFLA_VXLAN_GPE 27
+
+#define __IFLA_VXLAN_MAX 28
 
 #define IFLA_VXLAN_MAX  (__IFLA_VXLAN_MAX - 1)
+#endif
+
+#if !HAVE_DECL_IFLA_GENEVE_LABEL
+#define IFLA_GENEVE_UNSPEC 0
+#define IFLA_GENEVE_ID 1
+#define IFLA_GENEVE_REMOTE 2
+#define IFLA_GENEVE_TTL 3
+#define IFLA_GENEVE_TOS 4
+#define IFLA_GENEVE_PORT 5
+#define IFLA_GENEVE_COLLECT_METADATA 6
+#define IFLA_GENEVE_REMOTE6 7
+#define IFLA_GENEVE_UDP_CSUM 8
+#define IFLA_GENEVE_UDP_ZERO_CSUM6_TX 9
+#define IFLA_GENEVE_UDP_ZERO_CSUM6_RX 10
+#define IFLA_GENEVE_LABEL 11
+
+#define __IFLA_GENEVE_MAX 12
+
+#define IFLA_GENEVE_MAX  (__IFLA_GENEVE_MAX - 1)
 #endif
 
 #if !HAVE_DECL_IFLA_IPTUN_ENCAP_DPORT
@@ -1026,6 +1065,22 @@ struct btrfs_ioctl_quota_ctl_args {
 typedef int32_t key_serial_t;
 #endif
 
+#ifndef KEYCTL_JOIN_SESSION_KEYRING
+#define KEYCTL_JOIN_SESSION_KEYRING 1
+#endif
+
+#ifndef KEYCTL_CHOWN
+#define KEYCTL_CHOWN 4
+#endif
+
+#ifndef KEYCTL_SETPERM
+#define KEYCTL_SETPERM 5
+#endif
+
+#ifndef KEYCTL_DESCRIBE
+#define KEYCTL_DESCRIBE 6
+#endif
+
 #ifndef KEYCTL_READ
 #define KEYCTL_READ 11
 #endif
@@ -1034,8 +1089,42 @@ typedef int32_t key_serial_t;
 #define KEYCTL_SET_TIMEOUT 15
 #endif
 
+#ifndef KEY_POS_VIEW
+#define KEY_POS_VIEW    0x01000000
+#define KEY_POS_READ    0x02000000
+#define KEY_POS_WRITE   0x04000000
+#define KEY_POS_SEARCH  0x08000000
+#define KEY_POS_LINK    0x10000000
+#define KEY_POS_SETATTR 0x20000000
+
+#define KEY_USR_VIEW    0x00010000
+#define KEY_USR_READ    0x00020000
+#define KEY_USR_WRITE   0x00040000
+#define KEY_USR_SEARCH  0x00080000
+#define KEY_USR_LINK    0x00100000
+#define KEY_USR_SETATTR 0x00200000
+
+#define KEY_GRP_VIEW    0x00000100
+#define KEY_GRP_READ    0x00000200
+#define KEY_GRP_WRITE   0x00000400
+#define KEY_GRP_SEARCH  0x00000800
+#define KEY_GRP_LINK    0x00001000
+#define KEY_GRP_SETATTR 0x00002000
+
+#define KEY_OTH_VIEW    0x00000001
+#define KEY_OTH_READ    0x00000002
+#define KEY_OTH_WRITE   0x00000004
+#define KEY_OTH_SEARCH  0x00000008
+#define KEY_OTH_LINK    0x00000010
+#define KEY_OTH_SETATTR 0x00000020
+#endif
+
 #ifndef KEY_SPEC_USER_KEYRING
 #define KEY_SPEC_USER_KEYRING -4
+#endif
+
+#ifndef KEY_SPEC_SESSION_KEYRING
+#define KEY_SPEC_SESSION_KEYRING -3
 #endif
 
 #ifndef PR_CAP_AMBIENT
@@ -1107,6 +1196,14 @@ struct ethtool_link_settings {
 
 #endif
 
+#endif
+
+#ifndef SOL_ALG
+#define SOL_ALG 279
+#endif
+
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
 #endif
 
 #include "missing_syscall.h"
