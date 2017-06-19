@@ -611,18 +611,7 @@ static int session_stop_scope(Session *s, bool force) {
         if (r < 0)
                 log_warning_errno(r, "Failed to abandon session scope, ignoring: %s", bus_error_message(&error, r));
 
-        /* Optionally, let's kill everything that's left now. */
-        if (force || manager_shall_kill(s->manager, s->user->name)) {
-                char *job = NULL;
-
-                r = manager_stop_unit(s->manager, s->scope, &error, &job);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to stop session scope: %s", bus_error_message(&error, r));
-
-                free(s->scope_job);
-                s->scope_job = job;
-        } else
-                s->scope_job = mfree(s->scope_job);
+        s->scope_job = mfree(s->scope_job);
 
         return 0;
 }
