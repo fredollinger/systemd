@@ -180,29 +180,23 @@ int print_uid_for_user(char *user) {
         int r = get_user_creds(&user, &uid, &gid, NULL, NULL);
         if (r != 0) {
                 printf("get_user_creds failed for user: [%s]. Error code: [%i] \n", user, r);
+                return;
         }
         printf("User pid is for [%i] for [%s] \n", uid, user);
 }
 
 int main() {
+        const char *invalid = "invalid";
         const char *root = "root";
         const char *user = "user";
         const char *zday = "0day";
         uid_t uid;
         gid_t gid;
 
-/*
-        int r = get_user_creds(&zday, &uid, &gid, NULL, NULL);
-        printf("User pid is for [%i] for [%s] \n", r, zday);
-
-        r = get_user_creds(&root, &uid, &gid, NULL, NULL);
-        printf("User pid is for [%i] for [%s] \n", r, root);
-
-        int r = get_user_creds(&user, &uid, &gid, NULL, NULL);
-        printf("User pid is for [%i] for [%s] \n", uid, user);
-*/
-
         print_uid_for_user(user);
+        print_uid_for_user(root);
+        print_uid_for_user(zday);
+        print_uid_for_user(invalid);
 
         return 0;
 }
