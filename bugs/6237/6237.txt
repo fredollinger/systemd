@@ -1,0 +1,32 @@
+By: mapleray
+
+systemd can't handle the process previlege that belongs to user name startswith
+number, such as 0day
+
+In case of bug report: Expected behaviour you didn't see
+
+    The process started by systemd should be user previlege
+
+In case of bug report: Steps to reproduce the problem
+
+linux user's name : 0day
+conf file: socat.service
+
+[Unit]
+Description=0day socat service
+After=network.target
+
+[Service]
+User=0day
+Restart=always
+Type=simple
+WorkingDirectory=/home/0day/
+ExecStart=/usr/bin/socat TCP-LISTEN:18086,reuseaddr,fork EXEC:"/opt/run-elf"
+
+[Install]
+WantedBy=multi-user.target
+
+and then use systemctl start socat.service to start process, but the previlege is root
+
+P.S.
+I searched google and found that it was not right to named a linux user with 0day, it should satisfy "^[a-z][-a-z0-9]*\$ , but when I use xinted to start the service, it can handle the previlege rightly with linux user 0day
