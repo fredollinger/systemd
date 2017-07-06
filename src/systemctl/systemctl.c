@@ -8222,8 +8222,10 @@ static int systemctl_main(int argc, char *argv[]) {
 
 static int reload_with_fallback(void) {
 
+        char *cmd = "Reload";
+
         /* First, try systemd via D-Bus. */
-        if (daemon_reload(0, NULL, NULL) >= 0)
+        if (daemon_reload(1, &cmd, NULL) >= 0)
                 return 0;
 
         /* Nothing else worked, so let's try signals */
